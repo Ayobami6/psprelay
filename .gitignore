@@ -1,0 +1,24 @@
+# Binaries and build artifacts
+bin/
+tmp/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Air
+build-errors.log
+
+# Test coverage and binary outputs
+*.out
+*.test
+
+# Environment files with sensitive credentials
+# .env
+
+# IDE and OS files
+.DS_Store
+.idea/
+.vscode/
+.env

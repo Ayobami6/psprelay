@@ -1,0 +1,51 @@
+# .air.toml
+# Config file for Air (Go hot-reload) - https://github.com/air-verse/air
+
+root = "."
+testdata_dir = "testdata"
+tmp_dir = "tmp"
+
+[build]
+  # Build target binary
+  bin = "./tmp/main"
+  cmd = "go build -o ./tmp/main ./cmd/main.go"
+  
+  # Delay in milliseconds before triggering build after file change
+  delay = 500
+  
+  # Directories and files to ignore
+  exclude_dir = ["assets", "tmp", "vendor", "testdata", "bin", ".git"]
+  exclude_file = []
+  exclude_regex = ["_test\\.go$"]
+  exclude_unchanged = false
+  
+  # File extensions to watch for triggers
+  include_ext = ["go", "yaml", "yml", "env"]
+  include_dir = ["cmd", "internal"]
+  
+  # Stop and restart behavior
+  kill_delay = "500ms"
+  send_interrupt = true
+  stop_on_error = true
+  
+  # Log build errors
+  log = "build-errors.log"
+
+[color]
+  app = ""
+  build = "yellow"
+  main = "magenta"
+  runner = "green"
+  watcher = "cyan"
+
+[log]
+  main_only = false
+  silent = false
+  time = true
+
+[misc]
+  clean_on_exit = true
+
+[screen]
+  clear_on_rebuild = false
+  keep_scroll = true

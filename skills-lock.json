@@ -1,0 +1,47 @@
+{
+  "version": 2,
+  "skills": {
+    "bitnob-integration": {
+      "source": "Ayobami6/skills",
+      "sourceType": "github",
+      "skillPath": "skills/bitnob-integration/SKILL.md",
+      "computedHash": "07a55b8053e1d22de2f292bc8a3b74164f74d2fbd60f3f640dffbe664506140d"
+    },
+    "clean-code": {
+      "source": "Ayobami6/skills",
+      "sourceType": "github",
+      "skillPath": "skills/clean-code/SKILL.md",
+      "computedHash": "3821c27af6c5ad21583241cc91847a531be4c0069a68f35a97e71b0def377025"
+    },
+    "flutterwave-integration": {
+      "source": "Ayobami6/skills",
+      "sourceType": "github",
+      "skillPath": "skills/flutterwave-integration/SKILL.md",
+      "computedHash": "6f82530fe6a83aed58735fae06703edd1748a2ff4298b9f878cce3140c7dffc6"
+    },
+    "mailnow-integration": {
+      "source": "Ayobami6/skills",
+      "sourceType": "github",
+      "skillPath": "skills/mailnow-integration/SKILL.md",
+      "computedHash": "5781138990a2d579eea1bb8add2f1722d891ce724fb5cfa23c43729ded4e69e9"
+    },
+    "monnify-integration": {
+      "source": "Ayobami6/skills",
+      "sourceType": "github",
+      "skillPath": "skills/monnify-integration/SKILL.md",
+      "computedHash": "cbd26fca31b8c46230ec7e65e7ae79ff36808c30d6bc3414b24248a90abf1e6d"
+    },
+    "paystack-integration": {
+      "source": "Ayobami6/skills",
+      "sourceType": "github",
+      "skillPath": "skills/paystack-integration/SKILL.md",
+      "computedHash": "c5807fcd2af2dcf535e7cf42ac5cc4a2dd9bf3e2cdffaddca23b8e5f3a3f77cd"
+    },
+    "pr-reviewer": {
+      "source": "Ayobami6/skills",
+      "sourceType": "github",
+      "skillPath": "skills/pr-reviewer/SKILL.md",
+      "computedHash": "5bb156ce06c0be576d384f16ec591bd10946d102ca75af56c64116f02437e687"
+    }
+  }
+}

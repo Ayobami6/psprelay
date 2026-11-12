@@ -1,0 +1,21 @@
+version: v1
+products:
+  mailnow:
+    prefix: MN
+    secrets:
+      type: Opaque
+      encodeKey: lljskdjkdjjd
+      signatureKey: lljskdjkdjjd
+    endpoints:
+      - name: mailnow
+        url: https://mailnow.com/api
+      - name: mailnow-legacy
+        url: https://legacy.mailnow.com/api
+  tibicloud:
+    prefix: TC
+    secrets:
+      type: Opaque
+      encodeKey: lljskdjkdjjd
+    endpoints:
+      - name: tibicloud
+        url: https://tibicloud.com/api
