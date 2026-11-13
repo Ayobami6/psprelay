@@ -6,6 +6,8 @@ COVERAGE_FILE ?= coverage.out
 COVERAGE_THRESHOLD ?= 90.0
 BIN_DIR ?= bin
 
+.DEFAULT_GOAL := build
+
 .PHONY: run dev build test test-cov test-cov-html lint security ci docker-build docker-up docker-down
 
 run:

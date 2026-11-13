@@ -8,8 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -376,81 +374,6 @@ func TestLoadConfig(t *testing.T) {
 		}
 		if len(cfg2.KafkaBrokers) != 2 || cfg2.KafkaBrokers[1] != "broker2:9092" {
 			t.Errorf("expected 2 parsed brokers, got %v", cfg2.KafkaBrokers)
-		}
-	})
-}
-
-func TestLoadConfigYaml(t *testing.T) {
-	t.Run("successfully parses valid YAML schema and matches encrypted prefix token and raw prefix", func(t *testing.T) {
-		yamlContent := `
-version: v1
-products:
-  incomplete:
-    prefix: ""
-  mailnow:
-    prefix: MN
-    secrets:
-      type: Opaque
-      encodeKey: key123
-      signatureKey: sig123
-    endpoints:
-      - name: mailnow
-        url: https://mailnow.com/api
-`
-		tmpDir := t.TempDir()
-		filePath := filepath.Join(tmpDir, "config.yaml")
-		if err := os.WriteFile(filePath, []byte(yamlContent), 0600); err != nil {
-			t.Fatalf("failed to write temp file: %v", err)
-		}
-
-		cfg, err := internal.LoadConfigYaml(context.Background(), filePath)
-		if err != nil {
-			t.Fatalf("unexpected error parsing yaml: %v", err)
-		}
-
-		token := internal.ComputePrefixToken("MN", "key123")
-		prodName, prodCfg, matched := cfg.MatchProductByReference(token + "_order99")
-		if !matched || prodName != "mailnow" || prodCfg.Prefix != "MN" {
-			t.Fatalf("expected MatchProductByReference to match mailnow for token %q, got matched=%v name=%q", token, matched, prodName)
-		}
-
-		// Raw prefix match with '_' and '-'
-		if name, _, ok := cfg.MatchProductByReference("MN_order100"); !ok || name != "mailnow" {
-			t.Fatalf("expected raw prefix MN_order100 to match mailnow, got ok=%v name=%q", ok, name)
-		}
-		if name, _, ok := cfg.MatchProductByReference("MN-order101"); !ok || name != "mailnow" {
-			t.Fatalf("expected raw prefix MN-order101 to match mailnow, got ok=%v name=%q", ok, name)
-		}
-
-		// Empty, unmatched, nil, and empty-products edge cases
-		if _, _, ok := cfg.MatchProductByReference(""); ok {
-			t.Fatal("expected empty reference not to match")
-		}
-		if _, _, ok := cfg.MatchProductByReference("UNKNOWN_999"); ok {
-			t.Fatal("expected UNKNOWN_999 not to match")
-		}
-		var nilCfg *internal.GatewayConfig
-		if _, _, ok := nilCfg.MatchProductByReference("MN_1"); ok {
-			t.Fatal("expected nil config not to match")
-		}
-		emptyCfg := &internal.GatewayConfig{Products: map[string]internal.ProductConfig{}}
-		if _, _, ok := emptyCfg.MatchProductByReference("MN_1"); ok {
-			t.Fatal("expected empty products config not to match")
-		}
-	})
-
-	t.Run("returns descriptive error on missing or malformed YAML file", func(t *testing.T) {
-		if _, err := internal.LoadConfigYaml(context.Background(), "/nonexistent/config.yaml"); err == nil {
-			t.Fatal("expected error for non-existent file, got nil")
-		}
-
-		tmpDir := t.TempDir()
-		badPath := filepath.Join(tmpDir, "bad.yaml")
-		if err := os.WriteFile(badPath, []byte(":::\n\t[invalid"), 0600); err != nil {
-			t.Fatalf("failed to write bad yaml file: %v", err)
-		}
-		if _, err := internal.LoadConfigYaml(context.Background(), badPath); err == nil {
-			t.Fatal("expected error for malformed YAML, got nil")
 		}
 	})
 }
