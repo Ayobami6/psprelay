@@ -3,6 +3,7 @@ export PATH := $(GOPATH)/bin:$(PATH)
 
 AIR := $(shell which air 2>/dev/null || echo $(GOPATH)/bin/air)
 COVERAGE_FILE ?= coverage.out
+COVERAGE_THRESHOLD ?= 90.0
 BIN_DIR ?= bin
 
 .PHONY: run dev build test test-cov test-cov-html lint security ci docker-build docker-up docker-down
@@ -24,6 +25,9 @@ test:
 test-cov:
 	@go test -race -coverpkg=./... -coverprofile=$(COVERAGE_FILE) -covermode=atomic ./...
 	@go tool cover -func=$(COVERAGE_FILE)
+	@total=$$(go tool cover -func=$(COVERAGE_FILE) | awk '/^total:/ {gsub(/%/, "", $$3); print $$3}'); \
+	echo "Total test coverage: $${total}% (threshold: $(COVERAGE_THRESHOLD)%)"; \
+	awk -v total="$$total" -v min="$(COVERAGE_THRESHOLD)" 'BEGIN { if (total + 0 < min + 0) { printf "FAIL: coverage %.1f%% is below threshold %.1f%%\n", total, min; exit 1 } else { printf "PASS: coverage %.1f%% meets threshold %.1f%%\n", total, min } }'
 
 test-cov-html: test-cov
 	@go tool cover -html=$(COVERAGE_FILE) -o coverage.html
@@ -34,7 +38,7 @@ lint:
 security:
 	@go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
-ci: lint test build
+ci: lint test-cov build
 
 docker-build:
 	@docker build -t psprelay:latest .

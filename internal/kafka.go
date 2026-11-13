@@ -37,10 +37,23 @@ type EventPublisher interface {
 	Close() error
 }
 
+// KafkaMessageWriter abstracts kafka.Writer for deterministic unit testing.
+type KafkaMessageWriter interface {
+	WriteMessages(ctx context.Context, msgs ...kafka.Message) error
+	Close() error
+}
+
+// KafkaMessageReader abstracts kafka.Reader for deterministic unit testing.
+type KafkaMessageReader interface {
+	FetchMessage(ctx context.Context) (kafka.Message, error)
+	CommitMessages(ctx context.Context, msgs ...kafka.Message) error
+	Close() error
+}
+
 // KafkaEventPublisher implements EventPublisher using segmentio/kafka-go writers.
 type KafkaEventPublisher struct {
-	webhookWriter *kafka.Writer
-	dlqWriter     *kafka.Writer
+	webhookWriter KafkaMessageWriter
+	dlqWriter     KafkaMessageWriter
 }
 
 // NewKafkaEventPublisher initializes Kafka writers for the main webhook topic and DLQ topic.
@@ -65,6 +78,11 @@ func NewKafkaEventPublisher(brokers []string, webhookTopic, dlqTopic string) *Ka
 		AllowAutoTopicCreation: true,
 	}
 
+	return NewKafkaEventPublisherWithWriters(webhookWriter, dlqWriter)
+}
+
+// NewKafkaEventPublisherWithWriters constructs a KafkaEventPublisher with injected writers.
+func NewKafkaEventPublisherWithWriters(webhookWriter, dlqWriter KafkaMessageWriter) *KafkaEventPublisher {
 	return &KafkaEventPublisher{
 		webhookWriter: webhookWriter,
 		dlqWriter:     dlqWriter,
@@ -119,7 +137,7 @@ func (p *KafkaEventPublisher) Close() error {
 
 // KafkaConsumerRunner consumes webhook events from Kafka and delegates them to DispatcherUseCase.
 type KafkaConsumerRunner struct {
-	reader     *kafka.Reader
+	reader     KafkaMessageReader
 	dispatcher DispatcherUseCase
 	logger     *slog.Logger
 }
@@ -136,6 +154,14 @@ func NewKafkaConsumerRunner(brokers []string, topic, groupID string, dispatcher 
 		MaxWait:        1 * time.Second,
 	})
 
+	return NewKafkaConsumerRunnerWithReader(reader, dispatcher, logger)
+}
+
+// NewKafkaConsumerRunnerWithReader constructs a KafkaConsumerRunner with an injected reader.
+func NewKafkaConsumerRunnerWithReader(reader KafkaMessageReader, dispatcher DispatcherUseCase, logger *slog.Logger) *KafkaConsumerRunner {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &KafkaConsumerRunner{
 		reader:     reader,
 		dispatcher: dispatcher,
@@ -212,6 +238,9 @@ func NewOutboxWorker(
 	if minAge < 0 {
 		minAge = 5 * time.Second
 	}
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &OutboxWorker{
 		store:        store,
 		publisher:    publisher,
@@ -283,6 +312,9 @@ func NewRetryWorker(
 	}
 	if baseBackoff <= 0 {
 		baseBackoff = 5 * time.Second
+	}
+	if logger == nil {
+		logger = slog.Default()
 	}
 	return &RetryWorker{
 		store:        store,

@@ -2,7 +2,10 @@ package tests
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -21,6 +24,7 @@ type stubUpstreamDispatcher struct {
 	calls     []recordedDispatchCall
 	responses map[string]int
 	defaultSC int
+	sendErr   error
 }
 
 func (d *stubUpstreamDispatcher) Send(_ context.Context, targetURL string, _ string, headers http.Header, body []byte) (int, http.Header, []byte, error) {
@@ -32,6 +36,10 @@ func (d *stubUpstreamDispatcher) Send(_ context.Context, targetURL string, _ str
 		headers:   headers.Clone(),
 		body:      append([]byte(nil), body...),
 	})
+
+	if d.sendErr != nil {
+		return 0, nil, nil, d.sendErr
+	}
 
 	sc := d.defaultSC
 	if sc == 0 {
@@ -285,6 +293,335 @@ func TestDispatcherUseCase_NonBlockingRetryAndDLQ(t *testing.T) {
 		}
 		if len(pub.dlqMsgs) != 0 {
 			t.Fatalf("expected 0 DLQ messages on successful retry recovery, got %d", len(pub.dlqMsgs))
+		}
+	})
+}
+
+type failingWebhookStore struct {
+	internal.WebhookStore
+	saveErr          error
+	updateStatusErr  error
+	enqueueFailErr   error
+	claimOutboxErr   error
+	claimRetriesErr  error
+	hasDeliveriesErr error
+}
+
+func (f *failingWebhookStore) SaveEvent(ctx context.Context, event *internal.WebhookEvent) (*internal.WebhookEvent, bool, error) {
+	if f.saveErr != nil {
+		return nil, false, f.saveErr
+	}
+	return f.WebhookStore.SaveEvent(ctx, event)
+}
+
+func (f *failingWebhookStore) UpdateStatus(ctx context.Context, eventID string, status internal.WebhookStatus) error {
+	if f.updateStatusErr != nil {
+		return f.updateStatusErr
+	}
+	return f.WebhookStore.UpdateStatus(ctx, eventID, status)
+}
+
+func (f *failingWebhookStore) EnqueueDeliveryFailure(ctx context.Context, failure *internal.DeliveryFailure) error {
+	if f.enqueueFailErr != nil {
+		return f.enqueueFailErr
+	}
+	return f.WebhookStore.EnqueueDeliveryFailure(ctx, failure)
+}
+
+func (f *failingWebhookStore) ClaimPendingOutboxEvents(ctx context.Context, olderThan time.Duration, limit int, fn func(ctx context.Context, events []internal.WebhookEvent) ([]string, error)) error {
+	if f.claimOutboxErr != nil {
+		return f.claimOutboxErr
+	}
+	return f.WebhookStore.ClaimPendingOutboxEvents(ctx, olderThan, limit, fn)
+}
+
+func (f *failingWebhookStore) ClaimDueRetries(ctx context.Context, now time.Time, limit int, fn func(ctx context.Context, item internal.DeliveryFailure) internal.RetryAttemptResult) ([]internal.DeliveryFailure, error) {
+	if f.claimRetriesErr != nil {
+		return nil, f.claimRetriesErr
+	}
+	return f.WebhookStore.ClaimDueRetries(ctx, now, limit, fn)
+}
+
+func (f *failingWebhookStore) HasPendingOrFailedDeliveries(ctx context.Context, eventID string) (bool, bool, error) {
+	if f.hasDeliveriesErr != nil {
+		return false, false, f.hasDeliveriesErr
+	}
+	return f.WebhookStore.HasPendingOrFailedDeliveries(ctx, eventID)
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+type errReaderCloser struct{}
+
+func (errReaderCloser) Read(_ []byte) (int, error) { return 0, errors.New("read body error") }
+func (errReaderCloser) Close() error               { return nil }
+
+func TestDefaultHTTPDispatcher_Send(t *testing.T) {
+	t.Run("constructs default dispatcher and sends POST body and headers", func(t *testing.T) {
+		// Verify default and custom timeout constructors
+		if d := internal.NewDefaultHTTPDispatcher(0); d == nil {
+			t.Fatal("expected non-nil default dispatcher")
+		}
+		if d := internal.NewDefaultHTTPDispatcher(2 * time.Second); d == nil {
+			t.Fatal("expected non-nil custom dispatcher")
+		}
+
+		var gotMethod string
+		var gotBody string
+		var gotCustomHeader string
+
+		disp := internal.NewHTTPDispatcherWithClient(&http.Client{
+			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				gotMethod = r.Method
+				gotCustomHeader = r.Header.Get("X-Test-Header")
+				raw, _ := io.ReadAll(r.Body)
+				gotBody = string(raw)
+				return &http.Response{
+					StatusCode: http.StatusAccepted,
+					Header:     http.Header{"X-Resp-Header": []string{"ok"}},
+					Body:       io.NopCloser(strings.NewReader(`{"accepted":true}`)),
+				}, nil
+			}),
+		})
+
+		h := make(http.Header)
+		h.Add("X-Test-Header", "value-1")
+
+		sc, respH, respBody, err := disp.Send(context.Background(), "https://example.test/hook", http.MethodPost, h, []byte(`{"ping":1}`))
+		if err != nil {
+			t.Fatalf("unexpected Send error: %v", err)
+		}
+		if sc != http.StatusAccepted {
+			t.Fatalf("expected 202, got %d", sc)
+		}
+		if gotMethod != http.MethodPost || gotBody != `{"ping":1}` || gotCustomHeader != "value-1" {
+			t.Fatalf("unexpected request received: method=%s body=%s header=%s", gotMethod, gotBody, gotCustomHeader)
+		}
+		if respH.Get("X-Resp-Header") != "ok" || string(respBody) != `{"accepted":true}` {
+			t.Fatalf("unexpected response: headers=%v body=%s", respH, string(respBody))
+		}
+	})
+
+	t.Run("handles nil body, invalid method, transport error, and response read error", func(t *testing.T) {
+		disp := internal.NewHTTPDispatcherWithClient(&http.Client{
+			Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader("")),
+				}, nil
+			}),
+		})
+
+		sc, _, _, err := disp.Send(context.Background(), "https://example.test/hook", http.MethodGet, nil, nil)
+		if err != nil || sc != http.StatusOK {
+			t.Fatalf("expected 200 OK for GET with nil body, got sc=%d err=%v", sc, err)
+		}
+
+		// Invalid HTTP method triggers request creation error
+		if _, _, _, err := disp.Send(context.Background(), "https://example.test/hook", "INVALID METHOD\n", nil, nil); err == nil {
+			t.Fatal("expected error for invalid HTTP method, got nil")
+		}
+
+		// Transport failure
+		dispErr := internal.NewHTTPDispatcherWithClient(&http.Client{
+			Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				return nil, errors.New("connection refused")
+			}),
+		})
+		if _, _, _, err := dispErr.Send(context.Background(), "https://example.test/hook", http.MethodPost, nil, []byte("x")); err == nil {
+			t.Fatal("expected transport error, got nil")
+		}
+
+		// Response body read error
+		dispReadErr := internal.NewHTTPDispatcherWithClient(&http.Client{
+			Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       errReaderCloser{},
+				}, nil
+			}),
+		})
+		if sc, _, _, err := dispReadErr.Send(context.Background(), "https://example.test/hook", http.MethodPost, nil, []byte("x")); err == nil || sc != http.StatusOK {
+			t.Fatalf("expected body read error with status 200, got sc=%d err=%v", sc, err)
+		}
+	})
+}
+
+func TestRelayService_EdgeCases(t *testing.T) {
+	t.Run("handles SaveEvent error, nil publisher, UpdateStatus error, and pending duplicate re-publish", func(t *testing.T) {
+		base := internal.NewInMemoryWebhookStore()
+		failStore := &failingWebhookStore{WebhookStore: base, saveErr: errors.New("db write error")}
+		relay := internal.NewRelayService(failStore, nil, nil)
+
+		norm := &internal.NormalizedWebhook{
+			Provider:         internal.Paystack,
+			ProviderEventID:  "evt_edge_1",
+			EventType:        "charge.success",
+			PaymentReference: "MN_edge_1",
+			RawHeaders:       map[string]string{"X-Test": "1"},
+			RawPayload:       []byte(`{}`),
+		}
+
+		if _, err := relay.Ingest(context.Background(), norm); err == nil {
+			t.Fatal("expected SaveEvent error, got nil")
+		}
+
+		// nil publisher leaves status PENDING without error
+		relayNoPub := internal.NewRelayService(base, nil, nil)
+		ev, err := relayNoPub.Ingest(context.Background(), norm)
+		if err != nil {
+			t.Fatalf("unexpected error with nil publisher: %v", err)
+		}
+		if ev.Status != internal.WebhookStatusPending {
+			t.Fatalf("expected PENDING status, got %q", ev.Status)
+		}
+
+		// Duplicate PENDING event with active publisher and failing UpdateStatus
+		pub := &mockEventPublisher{}
+		updFailStore := &failingWebhookStore{WebhookStore: base, updateStatusErr: errors.New("update failed")}
+		relayUpdFail := internal.NewRelayService(updFailStore, pub, silentLogger())
+		ev2, err := relayUpdFail.Ingest(context.Background(), norm)
+		if err != nil {
+			t.Fatalf("unexpected error when UpdateStatus fails: %v", err)
+		}
+		if len(pub.webhooks) != 1 {
+			t.Fatalf("expected duplicate PENDING event to publish to Kafka, got %d", len(pub.webhooks))
+		}
+		if ev2.Status != internal.WebhookStatusPending {
+			t.Fatalf("expected status to remain PENDING when UpdateStatus fails, got %q", ev2.Status)
+		}
+	})
+}
+
+func TestDispatcherUseCase_UnmatchedAndErrorBranches(t *testing.T) {
+	t.Run("handles unmatched non-DVA webhook, nil gatewayCfg, and zero-endpoint product via DLQ", func(t *testing.T) {
+		store := internal.NewInMemoryWebhookStore()
+		pub := &mockEventPublisher{}
+		httpDisp := &stubUpstreamDispatcher{defaultSC: http.StatusOK}
+		gatewayCfg := sampleGatewayConfig()
+
+		// Non-DVA unmatched payment reference
+		uc := internal.NewDispatcherUseCase(gatewayCfg, httpDisp, store, pub, 0, nil)
+		saved, _, _ := store.SaveEvent(context.Background(), &internal.WebhookEvent{
+			Provider:         internal.Paystack,
+			ProviderEventID:  "evt_unmatched_1",
+			PaymentReference: "UNMATCHED_REF",
+			IsDVA:            false,
+			Headers:          map[string]string{"Host": "evil.local"},
+			Payload:          []byte(`{"event":"charge.success"}`),
+			Status:           internal.WebhookStatusPublished,
+		})
+		if err := uc.Execute(context.Background(), *saved); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		ev, _ := store.GetEvent(context.Background(), saved.ID)
+		if ev.Status != internal.WebhookStatusFailed {
+			t.Fatalf("expected FAILED status for unmatched webhook, got %q", ev.Status)
+		}
+		if len(pub.dlqMsgs) != 1 || pub.dlqMsgs[0].RoutingMode != internal.RoutingModeUnmatched {
+			t.Fatalf("expected 1 unmatched DLQ message, got %+v", pub.dlqMsgs)
+		}
+
+		// nil gatewayCfg also routes to unmatched
+		ucNilCfg := internal.NewDispatcherUseCase(nil, httpDisp, store, pub, 0, silentLogger())
+		saved2, _, _ := store.SaveEvent(context.Background(), &internal.WebhookEvent{
+			Provider:         internal.Paystack,
+			ProviderEventID:  "evt_unmatched_2",
+			PaymentReference: "MN_123",
+			IsDVA:            true,
+			Payload:          []byte(`{}`),
+			Status:           internal.WebhookStatusPublished,
+		})
+		if err := ucNilCfg.Execute(context.Background(), *saved2); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(pub.dlqMsgs) != 2 {
+			t.Fatalf("expected 2 DLQ messages, got %d", len(pub.dlqMsgs))
+		}
+
+		// Matched product with 0 endpoints routes to unmatched
+		noEpCfg := &internal.GatewayConfig{
+			Products: map[string]internal.ProductConfig{
+				"emptyprod": {Prefix: "EP", Endpoints: nil},
+			},
+		}
+		ucNoEp := internal.NewDispatcherUseCase(noEpCfg, httpDisp, store, pub, 0, silentLogger())
+		saved3, _, _ := store.SaveEvent(context.Background(), &internal.WebhookEvent{
+			Provider:         internal.Paystack,
+			ProviderEventID:  "evt_unmatched_3",
+			PaymentReference: "EP_123",
+			Payload:          []byte(`{}`),
+			Status:           internal.WebhookStatusPublished,
+		})
+		if err := ucNoEp.Execute(context.Background(), *saved3); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(pub.dlqMsgs) != 3 {
+			t.Fatalf("expected 3 DLQ messages, got %d", len(pub.dlqMsgs))
+		}
+	})
+
+	t.Run("strips hop-by-hop headers, omits signature when key empty, and logs transport/store errors", func(t *testing.T) {
+		base := internal.NewInMemoryWebhookStore()
+		failStore := &failingWebhookStore{
+			WebhookStore:    base,
+			enqueueFailErr:  errors.New("enqueue failed"),
+			updateStatusErr: errors.New("update failed"),
+		}
+		cfg := &internal.GatewayConfig{
+			Products: map[string]internal.ProductConfig{
+				"nosig": {
+					Prefix:    "NS",
+					Endpoints: []internal.ProductEndpoint{{Name: "ep1", URL: "https://example.com/hook"}},
+				},
+			},
+		}
+
+		// Transport error + failing enqueue
+		httpDispErr := &stubUpstreamDispatcher{sendErr: errors.New("dial tcp timeout")}
+		ucErr := internal.NewDispatcherUseCase(cfg, httpDispErr, failStore, nil, time.Millisecond, silentLogger())
+		saved, _, _ := base.SaveEvent(context.Background(), &internal.WebhookEvent{
+			Provider:         internal.Paystack,
+			ProviderEventID:  "evt_disp_err",
+			PaymentReference: "NS_1",
+			Headers: map[string]string{
+				"Host":              "orig.host",
+				"Connection":        "keep-alive",
+				"Keep-Alive":        "timeout=5",
+				"Transfer-Encoding": "chunked",
+				"Content-Length":    "99",
+				"X-Custom":          "keep",
+			},
+			Payload: []byte(`{"ok":1}`),
+			Status:  internal.WebhookStatusPublished,
+		})
+		if err := ucErr.Execute(context.Background(), *saved); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(httpDispErr.calls) != 1 {
+			t.Fatalf("expected 1 call, got %d", len(httpDispErr.calls))
+		}
+		sentHeaders := httpDispErr.calls[0].headers
+		for _, stripped := range []string{"Host", "Connection", "Keep-Alive", "Transfer-Encoding", "Content-Length", "X-PSPRelay-Signature"} {
+			if sentHeaders.Get(stripped) != "" {
+				t.Errorf("expected header %s to be stripped/omitted, got %q", stripped, sentHeaders.Get(stripped))
+			}
+		}
+		if sentHeaders.Get("X-Custom") != "keep" {
+			t.Errorf("expected X-Custom header to be preserved")
+		}
+
+		// Success delivery + UpdateStatus error
+		httpDispOK := &stubUpstreamDispatcher{defaultSC: http.StatusOK}
+		ucOK := internal.NewDispatcherUseCase(cfg, httpDispOK, failStore, nil, time.Millisecond, silentLogger())
+		if err := ucOK.Execute(context.Background(), *saved); err != nil {
+			t.Fatalf("unexpected error when UpdateStatus fails: %v", err)
 		}
 	})
 }

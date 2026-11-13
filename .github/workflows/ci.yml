@@ -61,6 +61,9 @@ jobs:
         run: |
           go test -race -v -coverpkg=./... -coverprofile=coverage.out -covermode=atomic ./...
           go tool cover -func=coverage.out
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub(/%/, "", $3); print $3}')
+          echo "Total test coverage: ${total}% (threshold: 90.0%)"
+          awk -v total="$total" 'BEGIN { if (total + 0 < 90.0) { printf "FAIL: coverage %.1f%% is below 90.0%%\n", total; exit 1 } else { printf "PASS: coverage %.1f%% meets 90.0%% threshold\n", total } }'
 
       - name: Write coverage summary
         if: matrix.os == 'ubuntu-latest'

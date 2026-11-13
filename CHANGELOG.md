@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dependabot configuration (`.github/dependabot.yml`) for automated weekly updates across `gomod`, `github-actions`, and `docker`.
 - Pull request template (`.github/pull_request_template.md`) and code ownership definition (`.github/CODEOWNERS`).
 - New Makefile targets: `test-cov`, `test-cov-html`, `security`, and `ci`.
+- Comprehensive unit and component tests across services (`service.go`, `providers.go`, `RelayService`), use cases (`HealthCheckUseCase`, `ReceiverUseCase`, `DispatcherUseCase`), controllers, middleware, HTTP dispatcher, Kafka publisher/consumer/workers, PostgreSQL & in-memory stores, and `cmd/main.go` lifecycle.
+- Automated 90.0% minimum statement coverage gate in `Makefile` (`test-cov`, `ci`) and GitHub Actions CI.
 
 ### Changed
 - Standardized error wrapping in provider services to use `%w: %w`.

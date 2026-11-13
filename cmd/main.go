@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,8 +22,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if err := run(ctx, cfg); err != nil {
+		println("Error running PSP Relay:", err.Error())
+		os.Exit(1)
+	}
+}
+
+func run(ctx context.Context, cfg *internal.Config) error {
 	logger := internal.NewLogger(cfg)
-	rootCtx, rootCancel := context.WithCancel(context.Background())
+	rootCtx, rootCancel := context.WithCancel(ctx)
 	defer rootCancel()
 
 	// Load gateway product configurations
@@ -40,11 +51,11 @@ func main() {
 		pgStore, pgErr := internal.NewPostgresWebhookStore(rootCtx, cfg.DatabaseURL)
 		if pgErr != nil {
 			logger.Error("Failed to initialize PostgreSQL store", "error", pgErr)
-			os.Exit(1)
+			return fmt.Errorf("initializing postgres store: %w", pgErr)
 		}
 		if schemaErr := pgStore.EnsureSchema(rootCtx); schemaErr != nil {
 			logger.Error("Failed to ensure PostgreSQL schema", "error", schemaErr)
-			os.Exit(1)
+			return fmt.Errorf("ensuring postgres schema: %w", schemaErr)
 		}
 		store = pgStore
 		logger.Info("Connected to PostgreSQL webhook store")
@@ -131,18 +142,23 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 	}
 
+	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("Starting PSP Relay HTTP server", "addr", cfg.Addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("Server listen failure", "error", err)
-			os.Exit(1)
+			errCh <- err
 		}
 	}()
 
-	// Graceful shutdown on SIGINT / SIGTERM
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	// Wait for context cancellation or unexpected server listen failure
+	select {
+	case <-ctx.Done():
+	case listenErr := <-errCh:
+		rootCancel()
+		workerWG.Wait()
+		return listenErr
+	}
 
 	logger.Info("Shutting down PSP Relay server and background workers...")
 	rootCancel()
@@ -156,4 +172,5 @@ func main() {
 
 	workerWG.Wait()
 	logger.Info("PSP Relay exited cleanly.")
+	return nil
 }

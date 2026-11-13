@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -93,9 +94,19 @@ type WebhookStore interface {
 	Close()
 }
 
+// PGPool abstracts *pgxpool.Pool for deterministic unit testing.
+type PGPool interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	Begin(ctx context.Context) (pgx.Tx, error)
+	Ping(ctx context.Context) error
+	Close()
+}
+
 // PostgresWebhookStore implements WebhookStore backed by PostgreSQL (pgxpool).
 type PostgresWebhookStore struct {
-	pool *pgxpool.Pool
+	pool PGPool
 }
 
 // NewPostgresWebhookStore connects to PostgreSQL and returns a initialized store.
@@ -113,7 +124,12 @@ func NewPostgresWebhookStore(ctx context.Context, databaseURL string) (*Postgres
 		return nil, fmt.Errorf("creating postgres pool: %w", err)
 	}
 
-	return &PostgresWebhookStore{pool: pool}, nil
+	return NewPostgresWebhookStoreWithPool(pool), nil
+}
+
+// NewPostgresWebhookStoreWithPool constructs a PostgresWebhookStore backed by a custom PGPool.
+func NewPostgresWebhookStoreWithPool(pool PGPool) *PostgresWebhookStore {
+	return &PostgresWebhookStore{pool: pool}
 }
 
 func (s *PostgresWebhookStore) EnsureSchema(ctx context.Context) error {
