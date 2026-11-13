@@ -113,7 +113,6 @@ func ErrorHandlerMiddleware() gin.HandlerFunc {
 	}
 }
 
-
 func CorsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")

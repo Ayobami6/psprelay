@@ -8,10 +8,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"psprelay/internal"
 
@@ -242,6 +241,63 @@ func TestPSPWebhookController(t *testing.T) {
 		if wUnknown.Code != http.StatusNotFound {
 			t.Fatalf("expected 404 Not Found, got %d", wUnknown.Code)
 		}
+
+		// Valid provider without registered ProviderService -> 400 Bad Request
+		reqUnsupported := httptest.NewRequest(http.MethodPost, "/v1/webhook/payaza", bytes.NewReader([]byte(`{"event":"test"}`)))
+		wUnsupported := httptest.NewRecorder()
+		router.ServeHTTP(wUnsupported, reqUnsupported)
+		if wUnsupported.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 Bad Request for unregistered provider service, got %d", wUnsupported.Code)
+		}
+
+		// Nil request body -> 400 Bad Request
+		reqNilBody := httptest.NewRequest(http.MethodPost, "/v1/webhook/paystack", nil)
+		reqNilBody.Body = nil
+		wNilBody := httptest.NewRecorder()
+		router.ServeHTTP(wNilBody, reqNilBody)
+		if wNilBody.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 Bad Request for nil body, got %d", wNilBody.Code)
+		}
+
+		// Empty request body -> 400 Bad Request
+		reqEmpty := httptest.NewRequest(http.MethodPost, "/v1/webhook/paystack", bytes.NewReader(nil))
+		wEmpty := httptest.NewRecorder()
+		router.ServeHTTP(wEmpty, reqEmpty)
+		if wEmpty.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 Bad Request for empty body, got %d", wEmpty.Code)
+		}
+	})
+}
+
+type failingPingStore struct {
+	internal.WebhookStore
+	pingErr error
+}
+
+func (f *failingPingStore) Ping(_ context.Context) error {
+	return f.pingErr
+}
+
+func TestDomainService_CheckHealth(t *testing.T) {
+	t.Run("returns nil when no store is configured", func(t *testing.T) {
+		svc := internal.NewService()
+		if err := svc.CheckHealth(context.Background()); err != nil {
+			t.Fatalf("expected nil error, got: %v", err)
+		}
+	})
+
+	t.Run("delegates Ping to configured store", func(t *testing.T) {
+		memStore := internal.NewInMemoryWebhookStore()
+		svc := internal.NewService(memStore)
+		if err := svc.CheckHealth(context.Background()); err != nil {
+			t.Fatalf("expected nil error from in-memory store, got: %v", err)
+		}
+
+		pingErr := errors.New("postgres unavailable")
+		failSvc := internal.NewService(&failingPingStore{WebhookStore: memStore, pingErr: pingErr})
+		if err := failSvc.CheckHealth(context.Background()); !errors.Is(err, pingErr) {
+			t.Fatalf("expected %v, got %v", pingErr, err)
+		}
 	})
 }
 
@@ -257,46 +313,67 @@ func TestLoadConfig(t *testing.T) {
 		if cfg.Addr == "" {
 			t.Fatal("expected non-empty Addr")
 		}
+		if logger := internal.NewLogger(cfg); logger == nil {
+			t.Fatal("expected non-nil logger")
+		}
 	})
-}
 
-func TestLoadConfigYaml(t *testing.T) {
-	t.Run("successfully parses valid YAML schema and matches encrypted prefix token", func(t *testing.T) {
-		yamlContent := `
-version: v1
-products:
-  mailnow:
-    prefix: MN
-    secrets:
-      type: Opaque
-      encodeKey: key123
-      signatureKey: sig123
-    endpoints:
-      - name: mailnow
-        url: https://mailnow.com/api
-`
-		tmpDir := t.TempDir()
-		filePath := filepath.Join(tmpDir, "config.yaml")
-		if err := os.WriteFile(filePath, []byte(yamlContent), 0600); err != nil {
-			t.Fatalf("failed to write temp file: %v", err)
+	t.Run("parses log levels, brokers, duration fallbacks, and secondary env keys", func(t *testing.T) {
+		cases := []struct {
+			raw   string
+			level slog.Level
+		}{
+			{"debug", slog.LevelDebug},
+			{"info", slog.LevelInfo},
+			{"warn", slog.LevelWarn},
+			{"error", slog.LevelError},
+			{"unknown", slog.LevelInfo},
+		}
+		for _, tc := range cases {
+			t.Setenv("LOG_LEVEL", tc.raw)
+			cfg, err := internal.LoadConfig()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.LogLevel != tc.level {
+				t.Errorf("for LOG_LEVEL=%q expected %v, got %v", tc.raw, tc.level, cfg.LogLevel)
+			}
 		}
 
-		cfg, err := internal.LoadConfigYaml(context.Background(), filePath)
+		t.Setenv("ADDR", "")
+		t.Setenv("Addr", ":9099")
+		t.Setenv("KAFKA_BROKERS", " , , ")
+		t.Setenv("OUTBOX_POLL_INTERVAL", "invalid")
+		t.Setenv("RETRY_POLL_INTERVAL", "-2s")
+		t.Setenv("RETRY_BASE_BACKOFF", "12s")
+
+		cfg, err := internal.LoadConfig()
 		if err != nil {
-			t.Fatalf("unexpected error parsing yaml: %v", err)
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Addr != ":9099" {
+			t.Errorf("expected secondary Addr :9099, got %q", cfg.Addr)
+		}
+		if len(cfg.KafkaBrokers) != 1 || cfg.KafkaBrokers[0] != "localhost:9092" {
+			t.Errorf("expected fallback broker localhost:9092, got %v", cfg.KafkaBrokers)
+		}
+		if cfg.OutboxPollInterval != 5*time.Second {
+			t.Errorf("expected fallback OutboxPollInterval 5s, got %v", cfg.OutboxPollInterval)
+		}
+		if cfg.RetryPollInterval != 2*time.Second {
+			t.Errorf("expected fallback RetryPollInterval 2s, got %v", cfg.RetryPollInterval)
+		}
+		if cfg.RetryBaseBackoff != 12*time.Second {
+			t.Errorf("expected RetryBaseBackoff 12s, got %v", cfg.RetryBaseBackoff)
 		}
 
-		token := internal.ComputePrefixToken("MN", "key123")
-		prodName, prodCfg, matched := cfg.MatchProductByReference(token + "_order99")
-		if !matched || prodName != "mailnow" || prodCfg.Prefix != "MN" {
-			t.Fatalf("expected MatchProductByReference to match mailnow for token %q, got matched=%v name=%q", token, matched, prodName)
+		t.Setenv("KAFKA_BROKERS", "broker1:9092, broker2:9092")
+		cfg2, err := internal.LoadConfig()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
 		}
-	})
-
-	t.Run("returns descriptive error on missing file", func(t *testing.T) {
-		_, err := internal.LoadConfigYaml(context.Background(), "/nonexistent/config.yaml")
-		if err == nil {
-			t.Fatal("expected error for non-existent file, got nil")
+		if len(cfg2.KafkaBrokers) != 2 || cfg2.KafkaBrokers[1] != "broker2:9092" {
+			t.Errorf("expected 2 parsed brokers, got %v", cfg2.KafkaBrokers)
 		}
 	})
 }

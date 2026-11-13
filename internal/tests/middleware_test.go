@@ -16,13 +16,13 @@ func TestErrorHandlerMiddleware(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	tests := []struct {
-		name               string
-		triggerErr         error
-		alreadyWritten     bool
-		expectedStatus     int
-		expectedTitle      string
-		expectedDetail     string
-		expectProblemResp  bool
+		name              string
+		triggerErr        error
+		alreadyWritten    bool
+		expectedStatus    int
+		expectedTitle     string
+		expectedDetail    string
+		expectProblemResp bool
 	}{
 		{
 			name:              "ErrKeyNotFound -> 404 Not Found",
@@ -94,6 +94,14 @@ func TestErrorHandlerMiddleware(t *testing.T) {
 			expectedStatus:    http.StatusBadRequest,
 			expectedTitle:     "Bad Request",
 			expectedDetail:    internal.ErrMissingSignature.Error(),
+			expectProblemResp: true,
+		},
+		{
+			name:              "ErrInvalidPayload -> 400 Bad Request",
+			triggerErr:        internal.ErrInvalidPayload,
+			expectedStatus:    http.StatusBadRequest,
+			expectedTitle:     "Bad Request",
+			expectedDetail:    internal.ErrInvalidPayload.Error(),
 			expectProblemResp: true,
 		},
 		{
@@ -194,4 +202,55 @@ func TestConstructProblemDetails_SafeFromPanics(t *testing.T) {
 	if pd.Status != 0 {
 		t.Errorf("expected zero status, got %d", pd.Status)
 	}
+
+	status := http.StatusTeapot
+	detail := "custom detail"
+	title := "Custom Title"
+	typ := "https://example.com/problem"
+	pd2 := internal.ConstructProblemDetails(&status, &detail, &title, &typ)
+	if pd2.Status != status || pd2.Detail != detail || pd2.Title != title || pd2.Type != typ {
+		t.Errorf("unexpected ConstructProblemDetails result: %+v", pd2)
+	}
+}
+
+func TestCorsMiddleware(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	router := gin.New()
+	router.Use(internal.CorsMiddleware())
+	router.GET("/ping", func(c *gin.Context) {
+		c.String(http.StatusOK, "pong")
+	})
+
+	t.Run("handles OPTIONS preflight with 204 No Content and CORS headers", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodOptions, "/ping", nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("expected 204 No Content, got %d", w.Code)
+		}
+		if got := w.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+			t.Errorf("expected Allow-Origin *, got %q", got)
+		}
+		if got := w.Header().Get("Access-Control-Allow-Methods"); got == "" {
+			t.Errorf("expected Allow-Methods header to be set")
+		}
+	})
+
+	t.Run("sets CORS headers and forwards non-OPTIONS requests", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/ping", nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		if got := w.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+			t.Errorf("expected Allow-Origin *, got %q", got)
+		}
+		if w.Body.String() != "pong" {
+			t.Errorf("expected body pong, got %q", w.Body.String())
+		}
+	})
 }

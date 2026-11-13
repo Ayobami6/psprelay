@@ -3,7 +3,9 @@
 # ------------------------------------------------------------------------------
 # Stage 1: Build binary statically
 # ------------------------------------------------------------------------------
-FROM golang:1.24-alpine AS builder
+FROM golang:1.27-alpine AS builder
+
+ENV GOTOOLCHAIN=auto
 
 WORKDIR /app
 
@@ -41,6 +43,6 @@ USER pspuser
 EXPOSE 8083
 
 HEALTHCHECK --interval=15s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:8083/healthz || exit 1
+  CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:8083/v1/healthz || exit 1
 
 ENTRYPOINT ["/app/psprelay"]

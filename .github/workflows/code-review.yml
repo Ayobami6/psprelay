@@ -1,0 +1,166 @@
+name: Code Review & PR Quality
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+  statuses: read
+
+jobs:
+  pr-title:
+    name: Conventional PR Title
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate PR title follows Conventional Commits
+        uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            style
+            refactor
+            perf
+            test
+            build
+            ci
+            chore
+            revert
+          requireScope: false
+
+  dependency-review:
+    name: Dependency Security & License Review
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4
+        continue-on-error: true
+        with:
+          fail-on-severity: high
+          deny-licenses: AGPL-3.0, GPL-3.0
+
+  reviewdog:
+    name: Inline Code Review Annotations
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run golangci-lint with reviewdog
+        uses: reviewdog/action-golangci-lint@v2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          golangci_lint_flags: "--timeout=5m"
+          reporter: github-pr-review
+          filter_mode: added
+          fail_on_error: true
+
+  ai-review:
+    name: Gemini AI Code Review
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gemini PR Review
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "GEMINI_API_KEY secret is not configured; skipping AI code review."
+            exit 0
+          fi
+
+          DIFF=$(git diff "$BASE_SHA"..."$HEAD_SHA" -- . ':(exclude)go.sum' ':(exclude)dist/*')
+          if [ -z "$DIFF" ]; then
+            echo "No reviewable diff found."
+            exit 0
+          fi
+
+          PROMPT=$(cat <<'EOF'
+          You are a Principal Go Systems Architect reviewing a pull request for PSPRelay (a high-throughput, fault-tolerant PSP Webhook Relay Service supporting Paystack, Flutterwave, and Monnify with transactional outbox, Kafka event streaming, and non-blocking retry/DLQ pipeline).
+          Review the diff strictly against these criteria:
+          1. Cryptographic security & webhooks: constant-time HMAC validation, no raw secret leakage, correct signature header resolution.
+          2. Concurrency & context: `context.Context` as first parameter across all I/O paths, thread-safety, no goroutine/resource leaks.
+          3. Database & outbox reliability: PostgreSQL row locking (`FOR UPDATE SKIP LOCKED`), atomic outbox state transitions, idempotency constraints.
+          4. Kafka streaming & retries: non-blocking retry worker, message ordering, proper DLQ routing, backoff jitter.
+          5. Architecture boundaries: domain models isolated from wire transport, strict interface boundaries, RFC 7807 problem details conformance.
+
+          Be concise and actionable. Group findings under:
+          - **Blocking Issues** (bugs, races, security, broken invariants)
+          - **Suggestions** (idiomatic Go, clarity, test coverage)
+          - **Summary Verdict** (Approve / Request Changes)
+          EOF
+          )
+
+          PAYLOAD=$(jq -n \
+            --arg prompt "$PROMPT" \
+            --arg diff "${DIFF:0:90000}" \
+            '{
+              contents: [{
+                parts: [{
+                  text: ($prompt + "\n\n```diff\n" + $diff + "\n```")
+                }]
+              }],
+              generationConfig: {
+                temperature: 0.2
+              }
+            }')
+
+          RESPONSE=$(curl -sS -X POST \
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent" \
+            -H "x-goog-api-key: ${GEMINI_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD")
+
+          API_ERROR=$(echo "$RESPONSE" | jq -r '.error.message // empty')
+          if [ -n "$API_ERROR" ]; then
+            echo "::warning::Gemini API error: $API_ERROR"
+            exit 0
+          fi
+
+          REVIEW_BODY=$(echo "$RESPONSE" | jq -r '[.candidates[0].content.parts[]? | select(.thought != true) | .text // empty] | join("\n")')
+          if [ -z "$REVIEW_BODY" ]; then
+            FINISH_REASON=$(echo "$RESPONSE" | jq -r '.candidates[0].finishReason // "UNKNOWN"')
+            echo "::warning::Gemini API did not return a review body (finishReason: $FINISH_REASON)."
+            exit 0
+          fi
+
+          {
+            echo "<!-- psprelay-gemini-review -->"
+            echo "## 🤖 Gemini Architecture & Code Review (${HEAD_SHA:0:7})"
+            echo ""
+            echo "$REVIEW_BODY"
+          } > /tmp/review.md
+
+          gh pr comment "$PR_NUMBER" --body-file /tmp/review.md

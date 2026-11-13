@@ -28,15 +28,18 @@ func NewDefaultHTTPDispatcher(timeout time.Duration) UpstreamDispatcher {
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 20,
 		IdleConnTimeout:     90 * time.Second,
-		DisableCompression: false,
+		DisableCompression:  false,
 	}
 
-	return &defaultHTTPDispatcher{
-		client: &http.Client{
-			Transport: transport,
-			Timeout:   timeout,
-		},
-	}
+	return NewHTTPDispatcherWithClient(&http.Client{
+		Transport: transport,
+		Timeout:   timeout,
+	})
+}
+
+// NewHTTPDispatcherWithClient constructs an UpstreamDispatcher backed by a custom *http.Client.
+func NewHTTPDispatcherWithClient(client *http.Client) UpstreamDispatcher {
+	return &defaultHTTPDispatcher{client: client}
 }
 
 func (d *defaultHTTPDispatcher) Send(ctx context.Context, targetURL string, method string, headers http.Header, body []byte) (int, http.Header, []byte, error) {
