@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Comprehensive `README.md` covering architecture, webhook lifecycle, product routing (HMAC prefix tokens), supported providers, API reference, downstream integration/signature verification, configuration, local setup, data model, delivery guarantees, and contribution guide.
 - GitHub Actions CI workflow (`.github/workflows/ci.yml`) covering linting, cross-platform matrix testing (`ubuntu-latest`, `macos-latest`), cross-compilation for 5 target architectures (`linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`, `windows/amd64`), Docker buildx image verification, and `govulncheck`.
 - Pull request quality workflow (`.github/workflows/code-review.yml`) with Conventional Commits validation, dependency license/CVE review, reviewdog inline comments, and automated Gemini AI architecture reviews.
 - CodeQL security analysis workflow (`.github/workflows/codeql.yml`) for continuous vulnerability scanning.
