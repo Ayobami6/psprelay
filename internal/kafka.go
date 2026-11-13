@@ -332,6 +332,12 @@ func (w *RetryWorker) Start(ctx context.Context) {
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
 
+	// ticker cleanup afer context cancellation to avoid goroutine leak
+	stopCleanup := context.AfterFunc(ctx, func() {
+		ticker.Stop()
+	})
+	defer stopCleanup()
+
 	w.logger.Info("Starting RetryWorker", "poll_interval", w.pollInterval, "base_backoff", w.baseBackoff)
 	for {
 		select {
