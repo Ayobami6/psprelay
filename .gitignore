@@ -1,5 +1,6 @@
 # Binaries and build artifacts
 bin/
+dist/
 tmp/
 *.exe
 *.exe~
@@ -12,6 +13,7 @@ build-errors.log
 
 # Test coverage and binary outputs
 *.out
+*.html
 *.test
 
 # Environment files with sensitive credentials

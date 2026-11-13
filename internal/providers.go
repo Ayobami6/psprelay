@@ -47,12 +47,12 @@ func (s *PaystackService) Provider() PSPProvider {
 type paystackWebhookPayload struct {
 	Event string `json:"event"`
 	Data  struct {
-		ID            any               `json:"id"`
-		Reference     string            `json:"reference"`
-		Channel       string            `json:"channel"`
-		Metadata      map[string]any    `json:"metadata"`
-		Authorization map[string]any    `json:"authorization"`
-		Customer      paystackCustomer  `json:"customer"`
+		ID            any              `json:"id"`
+		Reference     string           `json:"reference"`
+		Channel       string           `json:"channel"`
+		Metadata      map[string]any   `json:"metadata"`
+		Authorization map[string]any   `json:"authorization"`
+		Customer      paystackCustomer `json:"customer"`
 	} `json:"data"`
 }
 
@@ -77,7 +77,7 @@ func (s *PaystackService) VerifyAndParse(_ context.Context, headers http.Header,
 
 	var parsed paystackWebhookPayload
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidPayload, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidPayload, err)
 	}
 
 	metaRef := firstNonEmptyString(
@@ -124,10 +124,10 @@ func (s *FlutterwaveService) Provider() PSPProvider {
 }
 
 type flutterwaveWebhookPayload struct {
-	Event    string         `json:"event"`
-	EventType string        `json:"event.type"`
-	MetaData map[string]any `json:"meta_data"`
-	Data     struct {
+	Event     string         `json:"event"`
+	EventType string         `json:"event.type"`
+	MetaData  map[string]any `json:"meta_data"`
+	Data      struct {
 		ID          any            `json:"id"`
 		TxRef       string         `json:"tx_ref"`
 		TxRefCamel  string         `json:"txRef"`
@@ -156,7 +156,7 @@ func (s *FlutterwaveService) VerifyAndParse(_ context.Context, headers http.Head
 
 	var parsed flutterwaveWebhookPayload
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidPayload, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidPayload, err)
 	}
 
 	primaryRef := firstNonEmptyString(parsed.Data.TxRef, parsed.Data.TxRefCamel)
@@ -234,7 +234,7 @@ func (s *MonnifyService) VerifyAndParse(_ context.Context, headers http.Header, 
 
 	var parsed monnifyWebhookPayload
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidPayload, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidPayload, err)
 	}
 
 	metaRef := firstNonEmptyString(

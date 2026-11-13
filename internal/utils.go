@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v2"
@@ -43,7 +44,8 @@ type GatewayConfig struct {
 
 // LoadConfigYaml loads and parses the gateway YAML configuration file.
 func LoadConfigYaml(_ context.Context, filePath string) (*GatewayConfig, error) {
-	data, err := os.ReadFile(filePath)
+	cleanPath := filepath.Clean(filePath)
+	data, err := os.ReadFile(cleanPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading yaml config at %q: %w", filePath, err)
 	}

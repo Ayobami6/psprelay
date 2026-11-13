@@ -28,7 +28,7 @@ func NewDefaultHTTPDispatcher(timeout time.Duration) UpstreamDispatcher {
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 20,
 		IdleConnTimeout:     90 * time.Second,
-		DisableCompression: false,
+		DisableCompression:  false,
 	}
 
 	return &defaultHTTPDispatcher{

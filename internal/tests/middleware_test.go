@@ -16,13 +16,13 @@ func TestErrorHandlerMiddleware(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	tests := []struct {
-		name               string
-		triggerErr         error
-		alreadyWritten     bool
-		expectedStatus     int
-		expectedTitle      string
-		expectedDetail     string
-		expectProblemResp  bool
+		name              string
+		triggerErr        error
+		alreadyWritten    bool
+		expectedStatus    int
+		expectedTitle     string
+		expectedDetail    string
+		expectProblemResp bool
 	}{
 		{
 			name:              "ErrKeyNotFound -> 404 Not Found",

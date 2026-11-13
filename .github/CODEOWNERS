@@ -1,0 +1,14 @@
+# Default owner for everything in the repository
+*                       @Ayobami6
+
+# Core webhook relay, dispatcher, and provider integrations
+/cmd/                   @Ayobami6
+/internal/              @Ayobami6
+/config.yaml            @Ayobami6
+
+# Build, container, and CI/CD configurations
+/Dockerfile             @Ayobami6
+/docker-compose.yml     @Ayobami6
+/Makefile               @Ayobami6
+/.golangci.yml          @Ayobami6
+/.github/               @Ayobami6
