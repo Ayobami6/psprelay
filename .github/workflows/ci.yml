@@ -142,7 +142,18 @@ jobs:
 
       - name: Verify container binary execution
         run: |
-          docker run --rm psprelay:ci --help || true
+          docker run -d --name psprelay-ci -p 8083:8083 psprelay:ci
+          trap "docker rm -f psprelay-ci" EXIT
+          for i in $(seq 1 15); do
+            if curl -fsS http://127.0.0.1:8083/v1/healthz; then
+              echo ""
+              echo "Container healthcheck succeeded"
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs psprelay-ci
+          exit 1
 
   security:
     name: Vulnerability Check (govulncheck)
