@@ -26,7 +26,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 # ------------------------------------------------------------------------------
 # Stage 2: Minimal, secure runtime with non-root user
 # ------------------------------------------------------------------------------
-FROM alpine:3.21 AS runner
+FROM alpine:3.24 AS runner
 
 RUN addgroup -S pspgroup && adduser -S pspuser -G pspgroup
 
