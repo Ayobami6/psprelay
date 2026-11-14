@@ -350,23 +350,6 @@ func (u *managementUseCaseImpl) RetryFailureNow(ctx context.Context, failureID s
 		}
 		if failure.RetryCount >= failure.MaxRetries {
 			failure.Status = DeliveryStatusFailed
-			if u.publisher != nil {
-				_ = u.publisher.PublishDLQ(ctx, DLQMessage{
-					FailureID:    failure.ID,
-					EventID:      failure.EventID,
-					Provider:     failure.Provider,
-					Product:      failure.Product,
-					EndpointName: failure.EndpointName,
-					TargetURL:    failure.TargetURL,
-					RoutingMode:  failure.RoutingMode,
-					Headers:      failure.Headers,
-					Payload:      failure.Payload,
-					StatusCode:   failure.StatusCode,
-					ErrorMessage: failure.ErrorMessage,
-					RetryCount:   failure.RetryCount,
-					FailedAt:     time.Now().UTC(),
-				})
-			}
 		} else {
 			failure.Status = DeliveryStatusRetrying
 			failure.NextRetryAt = time.Now().UTC().Add(computeBackoffWithJitter(u.retryBaseBackoff, failure.RetryCount))
@@ -375,6 +358,24 @@ func (u *managementUseCaseImpl) RetryFailureNow(ctx context.Context, failureID s
 
 	if updateErr := u.store.UpdateDeliveryFailureAttempt(ctx, failure); updateErr != nil {
 		return nil, fmt.Errorf("updating delivery failure attempt %q: %w", trimmedID, updateErr)
+	}
+
+	if failure.Status == DeliveryStatusFailed && u.publisher != nil {
+		_ = u.publisher.PublishDLQ(ctx, DLQMessage{
+			FailureID:    failure.ID,
+			EventID:      failure.EventID,
+			Provider:     failure.Provider,
+			Product:      failure.Product,
+			EndpointName: failure.EndpointName,
+			TargetURL:    failure.TargetURL,
+			RoutingMode:  failure.RoutingMode,
+			Headers:      failure.Headers,
+			Payload:      failure.Payload,
+			StatusCode:   failure.StatusCode,
+			ErrorMessage: failure.ErrorMessage,
+			RetryCount:   failure.RetryCount,
+			FailedAt:     time.Now().UTC(),
+		})
 	}
 
 	u.reconcileParentEventStatus(ctx, failure.EventID)

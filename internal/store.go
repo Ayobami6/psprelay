@@ -196,11 +196,6 @@ CREATE TABLE IF NOT EXISTS webhook_events (
 
 ALTER TABLE webhook_events ADD COLUMN IF NOT EXISTS product TEXT NOT NULL DEFAULT 'unmatched';
 
-UPDATE webhook_events w
-SET product = df.product
-FROM delivery_failures df
-WHERE w.id = df.event_id AND w.product = 'unmatched' AND df.product <> 'unmatched';
-
 CREATE INDEX IF NOT EXISTS idx_webhook_events_outbox
 	ON webhook_events (created_at ASC)
 	WHERE status = 'PENDING';
@@ -237,6 +232,11 @@ CREATE INDEX IF NOT EXISTS idx_delivery_failures_event_id
 
 CREATE INDEX IF NOT EXISTS idx_delivery_failures_product_status
 	ON delivery_failures (product, status, updated_at DESC);
+
+UPDATE webhook_events w
+SET product = df.product
+FROM delivery_failures df
+WHERE w.id = df.event_id AND w.product = 'unmatched' AND df.product <> 'unmatched';
 `
 	_, err := s.pool.Exec(ctx, ddl)
 	if err != nil {
@@ -959,10 +959,16 @@ func (s *PostgresWebhookStore) BackfillEventProducts(ctx context.Context, matchF
 	}
 
 	updatedCount := 0
+	var updateErrs []error
 	for _, m := range matches {
-		if err := s.UpdateEventProduct(ctx, m.id, m.product); err == nil {
+		if err := s.UpdateEventProduct(ctx, m.id, m.product); err != nil {
+			updateErrs = append(updateErrs, fmt.Errorf("updating event %s to product %s: %w", m.id, m.product, err))
+		} else {
 			updatedCount++
 		}
+	}
+	if len(updateErrs) > 0 {
+		return updatedCount, errors.Join(updateErrs...)
 	}
 	return updatedCount, nil
 }

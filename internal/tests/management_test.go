@@ -385,6 +385,24 @@ func TestPostgresStore_ManagementMethods(t *testing.T) {
 			t.Fatalf("BackfillEventProducts failed: count=%d err=%v", bfCount, err)
 		}
 
+		// BackfillEventProducts update error
+		pool.queryFn = func(_ context.Context, _ string, _ ...any) (pgx.Rows, error) {
+			return &mockPGRows{
+				data: [][]any{
+					{"ev_unm2", "MN_test_2"},
+				},
+			}, nil
+		}
+		pool.execFn = func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
+			return pgconn.NewCommandTag(""), errors.New("db write failed")
+		}
+		bfFailCount, err := store.BackfillEventProducts(ctx, func(ref string) (string, bool) {
+			return "mailnow", true
+		})
+		if err == nil || bfFailCount != 0 {
+			t.Fatalf("expected error from BackfillEventProducts, got count=%d err=%v", bfFailCount, err)
+		}
+
 		// Zero rows affected -> ErrFailureNotFound
 		pool.execFn = func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
 			return pgconn.NewCommandTag("UPDATE 0"), nil
