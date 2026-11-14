@@ -5,16 +5,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"sort"
 	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	RoutingModeDirect       = "direct"
-	RoutingModeBroadcastDVA = "broadcast-dva"
-	RoutingModeUnmatched    = "unmatched"
+	RoutingModeDirect    = "direct"
+	RoutingModeUnmatched = "unmatched"
 )
 
 type healthCheckUseCaseImpl struct {
@@ -58,29 +56,44 @@ type RelayService interface {
 }
 
 type relayServiceImpl struct {
-	store     WebhookStore
-	publisher EventPublisher
-	logger    *slog.Logger
+	store      WebhookStore
+	publisher  EventPublisher
+	gatewayCfg *GatewayConfig
+	logger     *slog.Logger
 }
 
 // NewRelayService constructs the ingress RelayService.
 func NewRelayService(store WebhookStore, publisher EventPublisher, logger *slog.Logger) RelayService {
+	return NewRelayServiceWithConfig(store, publisher, nil, logger)
+}
+
+// NewRelayServiceWithConfig constructs the ingress RelayService with product prefix matching at ingestion time.
+func NewRelayServiceWithConfig(store WebhookStore, publisher EventPublisher, gatewayCfg *GatewayConfig, logger *slog.Logger) RelayService {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &relayServiceImpl{
-		store:     store,
-		publisher: publisher,
-		logger:    logger,
+		store:      store,
+		publisher:  publisher,
+		gatewayCfg: gatewayCfg,
+		logger:     logger,
 	}
 }
 
 func (s *relayServiceImpl) Ingest(ctx context.Context, normalized *NormalizedWebhook) (*WebhookEvent, error) {
+	product := RoutingModeUnmatched
+	if s.gatewayCfg != nil {
+		if matchedProd, _, ok := s.gatewayCfg.MatchProductByReference(normalized.PaymentReference); ok {
+			product = matchedProd
+		}
+	}
+
 	event := &WebhookEvent{
 		Provider:         normalized.Provider,
 		ProviderEventID:  normalized.ProviderEventID,
 		EventType:        normalized.EventType,
 		PaymentReference: normalized.PaymentReference,
+		Product:          product,
 		IsDVA:            normalized.IsDVA,
 		Headers:          normalized.RawHeaders,
 		Payload:          normalized.RawPayload,
@@ -212,6 +225,11 @@ func (u *dispatcherUseCaseImpl) Execute(ctx context.Context, event WebhookEvent)
 		return u.handleUnmatchedWebhook(ctx, event)
 	}
 
+	primaryProduct := routes[0].ProductName
+	if event.Product != primaryProduct {
+		_ = u.store.UpdateEventProduct(ctx, event.ID, primaryProduct)
+	}
+
 	type endpointTask struct {
 		productName string
 		productCfg  ProductConfig
@@ -312,25 +330,8 @@ func (u *dispatcherUseCaseImpl) resolveTargetProducts(event WebhookEvent) []targ
 		}
 	}
 
-	// 2. If DVA / static bank transfer webhook has no matching prefix, broadcast to all configured products
-	if event.IsDVA {
-		productNames := make([]string, 0, len(u.gatewayCfg.Products))
-		for name := range u.gatewayCfg.Products {
-			productNames = append(productNames, name)
-		}
-		sort.Strings(productNames)
-
-		routes := make([]targetProductRoute, 0, len(productNames))
-		for _, name := range productNames {
-			routes = append(routes, targetProductRoute{
-				ProductName: name,
-				Config:      u.gatewayCfg.Products[name],
-				RoutingMode: RoutingModeBroadcastDVA,
-			})
-		}
-		return routes
-	}
-
+	// Unmatched events (including DVA / static bank transfers without a product prefix)
+	// fail closed to handleUnmatchedWebhook -> DLQ rather than broadcasting to all products.
 	return nil
 }
 

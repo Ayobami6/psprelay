@@ -563,12 +563,13 @@ func TestPostgresWebhookStore(t *testing.T) {
 						*dest[2].(*string) = "pe_1"
 						*dest[3].(*string) = "charge.success"
 						*dest[4].(*string) = "MN_1"
-						*dest[5].(*bool) = false
-						*dest[6].(*[]byte) = []byte(`{"X-Test":"1"}`)
-						*dest[7].(*[]byte) = []byte(`{}`)
-						*dest[8].(*string) = "PUBLISHED"
-						*dest[9].(*time.Time) = now
+						*dest[5].(*string) = "mailnow"
+						*dest[6].(*bool) = false
+						*dest[7].(*[]byte) = []byte(`{"X-Test":"1"}`)
+						*dest[8].(*[]byte) = []byte(`{}`)
+						*dest[9].(*string) = "PUBLISHED"
 						*dest[10].(*time.Time) = now
+						*dest[11].(*time.Time) = now
 						return nil
 					}}
 				default:
@@ -609,7 +610,7 @@ func TestPostgresWebhookStore(t *testing.T) {
 	t.Run("ClaimPendingOutboxEvents claims, updates PUBLISHED, and commits", func(t *testing.T) {
 		rows := &mockPGRows{
 			data: [][]any{
-				{"ev_1", "paystack", "pe_1", "charge.success", "MN_1", false, []byte(`{}`), []byte(`{}`), "PENDING", now, now},
+				{"ev_1", "paystack", "pe_1", "charge.success", "MN_1", "mailnow", false, []byte(`{}`), []byte(`{}`), "PENDING", now, now},
 			},
 		}
 		var execCalled bool

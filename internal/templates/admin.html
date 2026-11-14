@@ -1,0 +1,663 @@
+{{define "dashboard"}}<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PSP Relay — Webhook Management Console</title>
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --panel: #111827;
+      --panel-hover: #1e293b;
+      --border: #1f2937;
+      --text: #f3f4f6;
+      --muted: #9ca3af;
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      line-height: 1.5;
+      padding-bottom: 4rem;
+    }
+    header {
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      padding: 1rem 2rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      font-weight: 700;
+      font-size: 1.15rem;
+      letter-spacing: -0.02em;
+    }
+    .brand-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--success);
+      box-shadow: 0 0 10px var(--success);
+    }
+    .container {
+      max-width: 1360px;
+      margin: 0 auto;
+      padding: 1.5rem 2rem;
+    }
+    .section-title {
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin-bottom: 0.75rem;
+      font-weight: 600;
+    }
+    .cards-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 1rem;
+      margin-bottom: 2rem;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 0.6rem;
+      padding: 1.1rem 1.25rem;
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .card:hover, .card.active {
+      border-color: var(--accent);
+      background: var(--panel-hover);
+    }
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.75rem;
+    }
+    .card-title {
+      font-weight: 600;
+      font-size: 1rem;
+      color: var(--text);
+    }
+    .prefix-badge {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      padding: 0.15rem 0.45rem;
+      border-radius: 0.25rem;
+      background: #1e293b;
+      color: #93c5fd;
+      border: 1px solid #334155;
+    }
+    .metrics-row {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 0.5rem;
+      text-align: center;
+    }
+    .metric-val {
+      font-size: 1.15rem;
+      font-weight: 700;
+      font-family: var(--font-mono);
+    }
+    .metric-lbl {
+      font-size: 0.7rem;
+      color: var(--muted);
+    }
+    .toolbar {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 0.6rem;
+      padding: 1rem 1.25rem;
+      margin-bottom: 1.25rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.85rem;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .tabs {
+      display: flex;
+      gap: 0.5rem;
+    }
+    .tab-btn {
+      padding: 0.45rem 0.95rem;
+      border-radius: 0.4rem;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 0.85rem;
+      cursor: pointer;
+    }
+    .tab-btn.active, .tab-btn:hover {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+    .filters {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.6rem;
+      align-items: center;
+    }
+    select, input[type="search"] {
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 0.4rem;
+      padding: 0.42rem 0.7rem;
+      font-size: 0.85rem;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.4rem 0.8rem;
+      border-radius: 0.4rem;
+      border: 1px solid transparent;
+      font-size: 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s, background 0.15s;
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: #fff;
+    }
+    .btn-primary:hover { background: var(--accent-hover); }
+    .btn-danger {
+      background: rgba(239, 68, 68, 0.15);
+      color: #fca5a5;
+      border-color: rgba(239, 68, 68, 0.35);
+    }
+    .btn-danger:hover {
+      background: rgba(239, 68, 68, 0.28);
+    }
+    .btn-outline {
+      background: transparent;
+      color: var(--text);
+      border-color: var(--border);
+    }
+    .btn-outline:hover { background: var(--panel-hover); }
+    .table-wrap {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 0.6rem;
+      overflow-x: auto;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+    }
+    th, td {
+      padding: 0.75rem 1rem;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+    th {
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      background: rgba(15, 23, 42, 0.6);
+    }
+    tr:hover td {
+      background: rgba(30, 41, 59, 0.4);
+    }
+    .mono {
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+    }
+    .badge {
+      display: inline-block;
+      padding: 0.15rem 0.5rem;
+      border-radius: 999px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      font-family: var(--font-mono);
+    }
+    .badge-DELIVERED, .badge-RESOLVED {
+      background: rgba(16, 185, 129, 0.15);
+      color: #6ee7b7;
+      border: 1px solid rgba(16, 185, 129, 0.35);
+    }
+    .badge-PUBLISHED, .badge-PENDING, .badge-RETRYING {
+      background: rgba(245, 158, 11, 0.15);
+      color: #fcd34d;
+      border: 1px solid rgba(245, 158, 11, 0.35);
+    }
+    .badge-FAILED {
+      background: rgba(239, 68, 68, 0.15);
+      color: #fca5a5;
+      border: 1px solid rgba(239, 68, 68, 0.35);
+    }
+    .drawer-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.65);
+      display: flex;
+      justify-content: flex-end;
+      z-index: 50;
+    }
+    .drawer {
+      width: min(680px, 95vw);
+      height: 100vh;
+      background: var(--panel);
+      border-left: 1px solid var(--border);
+      padding: 1.5rem;
+      overflow-y: auto;
+    }
+    pre {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 0.4rem;
+      padding: 0.85rem;
+      overflow-x: auto;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: #e2e8f0;
+      margin-top: 0.4rem;
+    }
+    .empty-state {
+      padding: 2.5rem;
+      text-align: center;
+      color: var(--muted);
+    }
+    .banner {
+      padding: 0.65rem 1rem;
+      background: rgba(16, 185, 129, 0.12);
+      border: 1px solid rgba(16, 185, 129, 0.35);
+      color: #6ee7b7;
+      border-radius: 0.4rem;
+      margin-bottom: 1rem;
+      font-size: 0.85rem;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="brand-dot"></span>
+      <span>PSP Relay Management Console</span>
+    </div>
+    <div style="display:flex; gap:0.75rem; align-items:center;">
+      <span class="mono" style="color:var(--muted);">Total Events: {{.Overview.TotalEvents}} | Active Retries: {{.Overview.ActiveRetries}} | DLQ Failed: {{.Overview.DeadLetterCount}}</span>
+      <a href="/admin" class="btn btn-outline">Refresh</a>
+    </div>
+  </header>
+
+  <main class="container">
+    <div class="section-title">Products &amp; Routing Telemetry</div>
+    <div class="cards-grid">
+      {{range .Overview.Products}}
+      <div class="card {{if eq $.ActiveProduct .Product}}active{{end}}"
+           hx-get="/admin/partials/{{$.ActiveTab}}?product={{.Product}}"
+           hx-target="#workspace-panel"
+           onclick="document.getElementById('filter-product').value='{{.Product}}'">
+        <div class="card-header">
+          <span class="card-title">{{.Product}}</span>
+          <span class="prefix-badge">prefix: {{.Prefix}}</span>
+        </div>
+        <div class="metrics-row">
+          <div>
+            <div class="metric-val">{{.TotalEvents}}</div>
+            <div class="metric-lbl">Total</div>
+          </div>
+          <div>
+            <div class="metric-val" style="color:var(--success)">{{.DeliveredEvents}}</div>
+            <div class="metric-lbl">Delivered</div>
+          </div>
+          <div>
+            <div class="metric-val" style="color:var(--warning)">{{.ActiveRetries}}</div>
+            <div class="metric-lbl">Retrying</div>
+          </div>
+          <div>
+            <div class="metric-val" style="color:var(--danger)">{{.DeadLetterCount}}</div>
+            <div class="metric-lbl">Failed</div>
+          </div>
+        </div>
+      </div>
+      {{end}}
+    </div>
+
+    <div class="toolbar">
+      <div class="tabs">
+        <button type="button" class="tab-btn {{if eq .ActiveTab "events"}}active{{end}}"
+                hx-get="/admin/partials/events"
+                hx-include="#filter-form"
+                hx-target="#workspace-panel"
+                onclick="setActiveTab(this, 'events')">
+          Webhook Events ({{.Overview.TotalEvents}})
+        </button>
+        <button type="button" class="tab-btn {{if eq .ActiveTab "failures"}}active{{end}}"
+                hx-get="/admin/partials/failures"
+                hx-include="#filter-form"
+                hx-target="#workspace-panel"
+                onclick="setActiveTab(this, 'failures')">
+          Delivery Failures ({{.Overview.ActiveRetries}} Retrying / {{.Overview.DeadLetterCount}} Failed)
+        </button>
+      </div>
+
+      <form id="filter-form" class="filters"
+            hx-get="/admin/partials/{{.ActiveTab}}"
+            hx-target="#workspace-panel"
+            hx-trigger="change, submit">
+        <input type="hidden" name="offset" value="0" />
+        <select id="filter-product" name="product">
+          <option value="">All Products</option>
+          {{range .Overview.Products}}
+          <option value="{{.Product}}" {{if eq $.ActiveProduct .Product}}selected{{end}}>{{.Product}}</option>
+          {{end}}
+        </select>
+
+        <select name="provider">
+          <option value="">All Providers</option>
+          <option value="paystack">paystack</option>
+          <option value="flutterwave">flutterwave</option>
+          <option value="monnify">monnify</option>
+        </select>
+
+        <select name="status">
+          <option value="">All Statuses</option>
+          <option value="DELIVERED">DELIVERED</option>
+          <option value="PUBLISHED">PUBLISHED</option>
+          <option value="PENDING">PENDING</option>
+          <option value="RETRYING">RETRYING</option>
+          <option value="FAILED">FAILED</option>
+          <option value="RESOLVED">RESOLVED</option>
+        </select>
+
+        <input type="search" name="q" placeholder="Search reference or event ID..." />
+        <button type="submit" class="btn btn-primary">Filter</button>
+      </form>
+    </div>
+
+    <div id="workspace-panel">
+      {{if eq .ActiveTab "failures"}}
+        {{template "failures_table" .FailuresPage}}
+      {{else}}
+        {{template "events_table" .EventsPage}}
+      {{end}}
+    </div>
+  </main>
+
+  <div id="modal-container"></div>
+
+  <script>
+    function setActiveTab(btn, tab) {
+      document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+      btn.classList.add('active');
+      const form = document.getElementById('filter-form');
+      form.setAttribute('hx-get', '/admin/partials/' + tab);
+      if (window.htmx) { htmx.process(form); }
+    }
+  </script>
+</body>
+</html>{{end}}
+
+{{define "events_table"}}
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Event ID</th>
+        <th>Product</th>
+        <th>Provider</th>
+        <th>Event Type</th>
+        <th>Payment Reference</th>
+        <th>DVA</th>
+        <th>Status</th>
+        <th>Received At</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Items}}
+      <tr>
+        <td class="mono">{{.ID}}</td>
+        <td><span class="prefix-badge">{{.Product}}</span></td>
+        <td class="mono">{{.Provider}}</td>
+        <td class="mono">{{.EventType}}</td>
+        <td class="mono">{{if .PaymentReference}}{{.PaymentReference}}{{else}}—{{end}}</td>
+        <td class="mono">{{if .IsDVA}}yes{{else}}no{{end}}</td>
+        <td><span class="badge badge-{{.Status}}">{{.Status}}</span></td>
+        <td class="mono">{{.CreatedAt.Format "2006-01-02 15:04:05"}}</td>
+        <td>
+          <button class="btn btn-outline"
+                  hx-get="/admin/partials/events/{{.ID}}"
+                  hx-target="#modal-container">
+            Inspect
+          </button>
+        </td>
+      </tr>
+      {{else}}
+      <tr>
+        <td colspan="9" class="empty-state">No webhook events matched your filter criteria.</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+{{if gt .Total 0}}
+<div class="pagination" style="display:flex; justify-content:space-between; align-items:center; margin-top:1rem; font-size:0.85rem;">
+  <span class="mono" style="color:var(--muted);">Showing page {{.Page}} of {{.TotalPages}} ({{.Total}} total events)</span>
+  <div style="display:flex; gap:0.5rem;">
+    {{if .HasPrev}}
+    <button class="btn btn-outline"
+            hx-get="/admin/partials/events?offset={{.PrevOffset}}&limit={{.Limit}}"
+            hx-include="#filter-form"
+            hx-target="#workspace-panel">
+      &larr; Previous
+    </button>
+    {{end}}
+    {{if .HasNext}}
+    <button class="btn btn-outline"
+            hx-get="/admin/partials/events?offset={{.NextOffset}}&limit={{.Limit}}"
+            hx-include="#filter-form"
+            hx-target="#workspace-panel">
+      Next &rarr;
+    </button>
+    {{end}}
+  </div>
+</div>
+{{end}}
+{{end}}
+
+{{define "failures_table"}}
+{{if .Notice}}
+<div class="banner">{{.Notice}}</div>
+{{end}}
+<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem;">
+  <span class="mono" style="color:var(--muted);">Showing {{len .Items}} of {{.Total}} delivery failure records</span>
+  <button class="btn btn-danger"
+          hx-post="/admin/failures/bulk-retry"
+          hx-include="#filter-form"
+          hx-target="#workspace-panel">
+    Retry All Failed
+  </button>
+</div>
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Failure ID</th>
+        <th>Product / Endpoint</th>
+        <th>Provider</th>
+        <th>Target URL</th>
+        <th>HTTP Code / Error</th>
+        <th>Attempts</th>
+        <th>Status</th>
+        <th>Updated At</th>
+        <th>Action</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Items}}
+        {{template "failure_row" .}}
+      {{else}}
+      <tr>
+        <td colspan="9" class="empty-state">No delivery failures found.</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+{{if gt .Total 0}}
+<div class="pagination" style="display:flex; justify-content:space-between; align-items:center; margin-top:1rem; font-size:0.85rem;">
+  <span class="mono" style="color:var(--muted);">Showing page {{.Page}} of {{.TotalPages}} ({{.Total}} total failures)</span>
+  <div style="display:flex; gap:0.5rem;">
+    {{if .HasPrev}}
+    <button class="btn btn-outline"
+            hx-get="/admin/partials/failures?offset={{.PrevOffset}}&limit={{.Limit}}"
+            hx-include="#filter-form"
+            hx-target="#workspace-panel">
+      &larr; Previous
+    </button>
+    {{end}}
+    {{if .HasNext}}
+    <button class="btn btn-outline"
+            hx-get="/admin/partials/failures?offset={{.NextOffset}}&limit={{.Limit}}"
+            hx-include="#filter-form"
+            hx-target="#workspace-panel">
+      Next &rarr;
+    </button>
+    {{end}}
+  </div>
+</div>
+{{end}}
+{{end}}
+
+{{define "failure_row"}}
+<tr id="failure-row-{{.ID}}">
+  <td class="mono">
+    <div>{{.ID}}</div>
+    <div style="color:var(--muted); font-size:0.72rem;">evt: {{.EventID}}</div>
+  </td>
+  <td>
+    <span class="prefix-badge">{{.Product}}</span>
+    <div class="mono" style="color:var(--muted); font-size:0.75rem; margin-top:0.2rem;">{{.EndpointName}} ({{.RoutingMode}})</div>
+  </td>
+  <td class="mono">{{.Provider}}</td>
+  <td class="mono" style="max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="{{.TargetURL}}">
+    {{if .TargetURL}}{{.TargetURL}}{{else}}— (unmatched){{end}}
+  </td>
+  <td>
+    <span class="mono" style="font-weight:700;">{{.StatusCode}}</span>
+    {{if .ErrorMessage}}
+    <div style="color:#fca5a5; font-size:0.75rem; max-width:260px; overflow:hidden; text-overflow:ellipsis;">{{.ErrorMessage}}</div>
+    {{end}}
+  </td>
+  <td class="mono">{{.RetryCount}} / {{.MaxRetries}}</td>
+  <td><span class="badge badge-{{.Status}}">{{.Status}}</span></td>
+  <td class="mono">{{.UpdatedAt.Format "2006-01-02 15:04:05"}}</td>
+  <td>
+    <div style="display:flex; gap:0.4rem;">
+      <button class="btn btn-primary"
+              hx-post="/admin/failures/{{.ID}}/retry"
+              hx-target="#failure-row-{{.ID}}"
+              hx-swap="outerHTML">
+        Retry Now
+      </button>
+      <button class="btn btn-outline"
+              hx-get="/admin/partials/events/{{.EventID}}"
+              hx-target="#modal-container">
+        Event
+      </button>
+    </div>
+  </td>
+</tr>
+{{end}}
+
+{{define "event_detail"}}
+<div class="drawer-backdrop" onclick="if(event.target===this) this.remove()">
+  <div class="drawer">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.25rem;">
+      <div>
+        <div class="section-title" style="margin-bottom:0.2rem;">Webhook Event Inspector</div>
+        <h3 class="mono">{{.Event.ID}}</h3>
+      </div>
+      <div style="display:flex; gap:0.5rem;">
+        <button class="btn btn-primary"
+                hx-post="/admin/events/{{.Event.ID}}/replay"
+                hx-target="#modal-container">
+          Replay Event
+        </button>
+        <button class="btn btn-outline" onclick="this.closest('.drawer-backdrop').remove()">Close</button>
+      </div>
+    </div>
+
+    {{if .Notice}}
+    <div class="banner">{{.Notice}}</div>
+    {{end}}
+
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.75rem; margin-bottom:1.25rem; font-size:0.85rem;">
+      <div><span style="color:var(--muted);">Product:</span> <span class="prefix-badge">{{.Event.Product}}</span></div>
+      <div><span style="color:var(--muted);">Status:</span> <span class="badge badge-{{.Event.Status}}">{{.Event.Status}}</span></div>
+      <div><span style="color:var(--muted);">Provider:</span> <span class="mono">{{.Event.Provider}}</span></div>
+      <div><span style="color:var(--muted);">Provider Event ID:</span> <span class="mono">{{.Event.ProviderEventID}}</span></div>
+      <div><span style="color:var(--muted);">Event Type:</span> <span class="mono">{{.Event.EventType}}</span></div>
+      <div><span style="color:var(--muted);">Reference:</span> <span class="mono">{{.Event.PaymentReference}}</span></div>
+    </div>
+
+    <div class="section-title">Inbound Headers</div>
+    <pre>{{range $k, $v := .Event.Headers}}{{$k}}: {{$v}}
+{{end}}</pre>
+
+    <div class="section-title" style="margin-top:1.25rem;">Raw JSON Payload</div>
+    <pre>{{.PrettyPayload}}</pre>
+
+    <div class="section-title" style="margin-top:1.25rem;">Delivery Failures &amp; Retry History ({{len .Failures}})</div>
+    {{if .Failures}}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Endpoint</th>
+            <th>Status</th>
+            <th>HTTP / Error</th>
+            <th>Retries</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{range .Failures}}
+          <tr id="modal-failure-{{.ID}}">
+            <td class="mono">{{.Product}} / {{.EndpointName}}</td>
+            <td><span class="badge badge-{{.Status}}">{{.Status}}</span></td>
+            <td class="mono">{{.StatusCode}} {{.ErrorMessage}}</td>
+            <td class="mono">{{.RetryCount}}/{{.MaxRetries}}</td>
+            <td>
+              <button class="btn btn-primary"
+                      hx-post="/admin/failures/{{.ID}}/retry"
+                      hx-target="#modal-failure-{{.ID}}"
+                      hx-swap="outerHTML">
+                Retry
+              </button>
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <div style="color:var(--muted); font-size:0.85rem;">No delivery failures recorded for this event.</div>
+    {{end}}
+  </div>
+</div>
+{{end}}

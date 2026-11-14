@@ -13,7 +13,7 @@ build-errors.log
 
 # Test coverage and binary outputs
 *.out
-*.html
+coverage.html
 *.test
 
 # Environment files with sensitive credentials

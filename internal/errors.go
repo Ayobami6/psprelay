@@ -24,4 +24,6 @@ var (
 	ErrMissingSignature = errors.New("missing signature header")
 	ErrSecretNotFound   = errors.New("secret key not configured for provider")
 	ErrInvalidPayload   = errors.New("invalid or malformed webhook payload")
+	ErrEventNotFound    = errors.New("webhook event not found")
+	ErrFailureNotFound  = errors.New("delivery failure not found")
 )

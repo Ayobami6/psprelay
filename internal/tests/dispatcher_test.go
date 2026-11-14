@@ -85,7 +85,7 @@ func sampleGatewayConfig() *internal.GatewayConfig {
 	}
 }
 
-func TestDispatcherUseCase_FanOutAndDVABroadcast(t *testing.T) {
+func TestDispatcherUseCase_FanOutAndUnmatchedDVA(t *testing.T) {
 	gatewayCfg := sampleGatewayConfig()
 
 	t.Run("matches deterministic HMAC prefix token and fans out to all endpoints of owning product", func(t *testing.T) {
@@ -136,7 +136,7 @@ func TestDispatcherUseCase_FanOutAndDVABroadcast(t *testing.T) {
 		}
 	})
 
-	t.Run("broadcasts unmatched DVA webhook to all products with broadcast-dva routing mode", func(t *testing.T) {
+	t.Run("routes unmatched DVA webhook to DLQ instead of broadcasting to all products", func(t *testing.T) {
 		store := internal.NewInMemoryWebhookStore()
 		pub := &mockEventPublisher{}
 		httpDisp := &stubUpstreamDispatcher{defaultSC: http.StatusOK}
@@ -156,15 +156,17 @@ func TestDispatcherUseCase_FanOutAndDVABroadcast(t *testing.T) {
 			t.Fatalf("DispatcherUseCase.Execute failed: %v", err)
 		}
 
-		// mailnow (2 endpoints) + tibicloud (1 endpoint) = 3 calls
-		if len(httpDisp.calls) != 3 {
-			t.Fatalf("expected 3 broadcast HTTP calls across all products, got %d", len(httpDisp.calls))
+		if len(httpDisp.calls) != 0 {
+			t.Fatalf("expected 0 HTTP calls for unmatched DVA webhook, got %d", len(httpDisp.calls))
 		}
 
-		for _, c := range httpDisp.calls {
-			if c.headers.Get("X-PSPRelay-Routing-Mode") != internal.RoutingModeBroadcastDVA {
-				t.Errorf("expected X-PSPRelay-Routing-Mode broadcast-dva, got %q", c.headers.Get("X-PSPRelay-Routing-Mode"))
-			}
+		updated, _ := store.GetEvent(context.Background(), saved.ID)
+		if updated.Status != internal.WebhookStatusFailed {
+			t.Fatalf("expected event status FAILED, got %q", updated.Status)
+		}
+
+		if len(pub.dlqMsgs) != 1 || pub.dlqMsgs[0].RoutingMode != internal.RoutingModeUnmatched {
+			t.Fatalf("expected 1 unmatched DLQ message, got %+v", pub.dlqMsgs)
 		}
 	})
 }

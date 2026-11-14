@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"crypto/subtle"
 	"errors"
 	"net/http"
 
@@ -70,7 +71,9 @@ func ErrorHandlerMiddleware() gin.HandlerFunc {
 		case errors.Is(err, ErrProductNotFound),
 			errors.Is(err, ErrEndpointNotFound),
 			errors.Is(err, ErrProviderNotFound),
-			errors.Is(err, ErrKeyNotFound):
+			errors.Is(err, ErrKeyNotFound),
+			errors.Is(err, ErrEventNotFound),
+			errors.Is(err, ErrFailureNotFound):
 			statusCode = http.StatusNotFound
 			detail = err.Error()
 
@@ -122,6 +125,44 @@ func CorsMiddleware() gin.HandlerFunc {
 
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(http.StatusNoContent)
+			return
+		}
+
+		c.Next()
+	}
+}
+
+// AdminAuthMiddleware enforces HTTP Basic Authentication on admin UI and REST routes
+// whenever username or password is configured. In production, credentials are required.
+// It also protects against cross-site request forgery by rejecting cross-site mutating requests.
+func AdminAuthMiddleware(username, password string, env Environment) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead && c.Request.Method != http.MethodOptions {
+			if c.GetHeader("Sec-Fetch-Site") == "cross-site" {
+				pd := NewProblemDetails(http.StatusForbidden, "cross-site requests not allowed")
+				pd.Respond(c)
+				return
+			}
+		}
+
+		if username == "" && password == "" {
+			if env == EnvironmentProduction {
+				c.Header("WWW-Authenticate", `Basic realm="PSP Relay Admin"`)
+				pd := NewProblemDetails(http.StatusUnauthorized, "admin access disabled: ADMIN_USERNAME and ADMIN_PASSWORD must be configured in production")
+				pd.Respond(c)
+				return
+			}
+			c.Next()
+			return
+		}
+
+		reqUser, reqPass, ok := c.Request.BasicAuth()
+		userMatch := subtle.ConstantTimeCompare([]byte(reqUser), []byte(username)) == 1
+		passMatch := subtle.ConstantTimeCompare([]byte(reqPass), []byte(password)) == 1
+		if !ok || !userMatch || !passMatch {
+			c.Header("WWW-Authenticate", `Basic realm="PSP Relay Admin"`)
+			pd := NewProblemDetails(http.StatusUnauthorized, "invalid or missing admin credentials")
+			pd.Respond(c)
 			return
 		}
 
