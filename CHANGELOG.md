@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Optional HTTP Basic Authentication middleware (`AdminAuthMiddleware`) configured via `ADMIN_USERNAME` and `ADMIN_PASSWORD`.
 - `product` attribution column and `(product, created_at DESC)` index on `webhook_events` resolved at ingestion and dispatch.
 - Comprehensive `README.md` covering architecture, webhook lifecycle, product routing (HMAC prefix tokens), supported providers, API reference, downstream integration/signature verification, configuration, local setup, data model, delivery guarantees, and contribution guide.
+- Detailed Setup Guide in `README.md` covering end-to-end deployment, provider webhook URL configuration (Paystack, Flutterwave, Monnify), product routing (`config.yaml`), and payment reference tagging (#10).
+- Relayed Webhook Payload specification in `README.md` documenting HTTP request anatomy, relay headers (`X-PSP-Provider`, `X-PSPRelay-Event-ID`, `X-PSPRelay-Signature`, `X-PSPRelay-Retry-Attempt`), and concrete payload examples for Paystack, Flutterwave, and Monnify (#10).
+- Downstream integration recipes in `README.md` featuring full Go, TypeScript/Node.js (Express), and Python (FastAPI) implementations with constant-time signature verification and idempotent deduplication (#10).
 - GitHub Actions CI workflow (`.github/workflows/ci.yml`) covering linting, cross-platform matrix testing (`ubuntu-latest`, `macos-latest`), cross-compilation for 5 target architectures (`linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`, `windows/amd64`), Docker buildx image verification, and `govulncheck`.
 - Pull request quality workflow (`.github/workflows/code-review.yml`) with Conventional Commits validation, dependency license/CVE review, reviewdog inline comments, and automated Gemini AI architecture reviews.
 - CodeQL security analysis workflow (`.github/workflows/codeql.yml`) for continuous vulnerability scanning.
