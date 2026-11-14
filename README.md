@@ -19,6 +19,8 @@ Most PSP dashboards let you register only one webhook URL per account. If severa
 - [Product Routing](#product-routing)
 - [Supported Providers](#supported-providers)
 - [API Reference](#api-reference)
+- [Setup Guide](#setup-guide)
+- [Relayed Webhook Payload](#relayed-webhook-payload)
 - [Downstream Integration](#downstream-integration)
 - [Configuration](#configuration)
 - [Getting Started](#getting-started)
@@ -286,40 +288,457 @@ PSP Relay includes an embedded, server-rendered HTMX Management UI at `/admin` a
 
 ---
 
-## Downstream Integration
+## Setup Guide
 
-Product endpoints get a `POST` containing the **original, unmodified PSP payload**. The PSP's original headers are kept (minus hop-by-hop headers), and these are added:
+Setting up PSP Relay connects your Payment Service Providers to your internal product microservices in 4 straightforward steps:
 
-| Header | Description |
-|---|---|
-| `X-PSP-Provider` | Source provider (`paystack`, `flutterwave`, `monnify`) |
-| `X-PSPRelay-Event-ID` | Stable relay event ID. **Use it as your idempotency key.** |
-| `X-PSPRelay-Routing-Mode` | `direct` |
-| `X-PSPRelay-Signature` | Hex HMAC-SHA256 of the raw body using the product's `signatureKey` (sent only when one is configured) |
-| `X-PSPRelay-Retry-Attempt` | Retry number (`1`–`3`), present on retries only |
+```mermaid
+flowchart TD
+    Step1["1. Deploy PSP Relay (PostgreSQL + Kafka + Gateway)"] --> Step2["2. Configure PSP Webhooks (Paystack, Flutterwave, Monnify Dashboards)"]
+    Step2 --> Step3["3. Configure Product Routing (config.yaml)"]
+    Step3 --> Step4["4. Tag Outbound Charges (Prefix payment references in product apps)"]
+```
 
-A delivery counts as successful when the endpoint returns **any 2xx** within **5 seconds**.
+### 1. Deploy & Run PSP Relay
 
-> [!IMPORTANT]
-> Delivery is **at-least-once**. The same event can arrive more than once, for example after a retry or a consumer rebalance. Deduplicate on `X-PSPRelay-Event-ID`.
+Deploy the gateway binary alongside PostgreSQL (for the transactional outbox, events, and retry state) and Kafka (for event buffering and consumer fan-out):
 
-### Verifying the relay signature
+1. **Create an environment file (`.env`):**
+   ```bash
+   cat > .env <<'EOF'
+   ENVIRONMENT=production
+   ADDR=:8083
+   DATABASE_URL=postgres://psprelay_user:secret_password@postgres:5432/psprelay?sslmode=require
+   KAFKA_BROKERS=kafka:9092
+   KAFKA_TOPIC=psp.webhooks
+   KAFKA_DLQ_TOPIC=psp.webhooks.dlq
+   CONFIG_FILE_PATH=/etc/psprelay/config.yaml
 
-```go
-func verifyRelaySignature(body []byte, header, signatureKey string) bool {
-    mac := hmac.New(sha256.New, []byte(signatureKey))
-    mac.Write(body)
-    expected := hex.EncodeToString(mac.Sum(nil))
-    return hmac.Equal([]byte(expected), []byte(strings.ToLower(header)))
+   # Provider Secrets (configure only the PSPs you actively use)
+   PAYSTACK_SECRET_KEY=<your-paystack-secret-key>
+   FLUTTERWAVE_SECRET_HASH=<your-flutterwave-secret-hash>
+   MONNIFY_SECRET_KEY=<your-monnify-secret-key>
+
+   # Management Console Basic Auth
+   ADMIN_USERNAME=admin
+   ADMIN_PASSWORD=change_this_to_a_strong_password
+   EOF
+   ```
+
+2. **Launch with Docker Compose or the standalone binary:**
+   ```bash
+   # Option A: Full stack via Docker Compose
+   make docker-up
+
+   # Option B: Run binary natively
+   make build
+   ./bin/psprelay
+   ```
+
+3. **Verify gateway health:**
+   ```bash
+   curl -i http://localhost:8083/v1/healthz
+   # HTTP/1.1 200 OK
+   # {"status":"healthy","message":"All systems operational"}
+   ```
+
+### 2. Configure PSP Webhook URLs
+
+Register your public PSP Relay gateway endpoints in each payment provider's developer dashboard. PSP Relay exposes dedicated ingress paths per provider:
+
+| Provider | Dashboard Navigation | Webhook URL to Register | Required Secret Config |
+|---|---|---|---|
+| **Paystack** | Settings &rarr; Preferences &rarr; Webhooks | `https://relay.yourdomain.com/v1/webhook/paystack` | Set `PAYSTACK_SECRET_KEY` in Relay `.env` to your Paystack secret key |
+| **Flutterwave** | Settings &rarr; Webhooks &rarr; Webhook URL | `https://relay.yourdomain.com/v1/webhook/flutterwave` | Enter a secret hash in the dashboard and set `FLUTTERWAVE_SECRET_HASH` to match |
+| **Monnify** | Settings &rarr; Developers &rarr; Webhook URL | `https://relay.yourdomain.com/v1/webhook/monnify` | Set `MONNIFY_SECRET_KEY` to your Monnify client secret key |
+
+> [!TIP]
+> When testing locally, expose your local port with a secure tunnel (e.g. `ngrok http 8083` or Cloudflare Tunnel) and paste the temporary public URL into your provider's test dashboard settings.
+
+### 3. Configure Product Routing (`config.yaml`)
+
+Map your product services in `config.yaml`. For each product, specify its routing prefix, secrets for downstream signature verification, and destination endpoint URLs:
+
+```yaml
+version: v1
+products:
+  mailnow:
+    prefix: MN                             # 2-4 character product prefix
+    secrets:
+      type: Opaque
+      encodeKey: "f4a9b2c8e1d70356"         # 16-32 char secret used to derive HMAC prefix tokens
+      signatureKey: "sec_sig_mn_83901kd8"  # Secret used by Relay to sign outbound webhooks (HMAC-SHA256)
+    endpoints:
+      - name: mailnow-api
+        url: https://api.mailnow.xyz/v1/webhooks/psp
+  tibicloud:
+    prefix: TC
+    secrets:
+      type: Opaque
+      encodeKey: "9c8b7a6e5d4c3b2a"
+      signatureKey: "sec_sig_tc_918237fa"
+    endpoints:
+      - name: tibicloud-billing
+        url: https://billing.tibicloud.com/webhooks/psp
+```
+
+### 4. Tag Outbound Charges in Your Product Applications
+
+When initiating a transaction or creating an invoice in your product backend via the PSP API, tag the `reference` or `tx_ref` field so PSP Relay can route the webhook to the correct product:
+
+- **Option A: HMAC Prefix Token (Recommended):** Obscures internal product identifiers from end-users while ensuring tamper-proof routing:
+  ```text
+  <12-char-token>_<transaction_uuid>
+  Example: 3f9a1c0be27d_inv_982341
+  ```
+  Formula: `hex(HMAC-SHA256(prefix, encodeKey))[:12] + "_" + internalID`
+
+- **Option B: Plaintext Prefix:**
+  ```text
+  <PREFIX>_<transaction_uuid>
+  Example: MN_inv_982341
+  ```
+
+---
+
+## Relayed Webhook Payload
+
+When PSP Relay forwards a verified webhook to a downstream product endpoint, it delivers the **exact byte-for-byte original JSON payload** received from the PSP. It does not wrap, nest, or strip the provider's payload structure.
+
+### HTTP Request Anatomy
+
+Downstream product endpoints receive an HTTP `POST` request with the following headers and raw JSON body:
+
+```http
+POST /v1/webhooks/psp HTTP/1.1
+Host: api.mailnow.xyz
+Content-Type: application/json
+X-PSP-Provider: paystack
+X-PSPRelay-Event-ID: 7a8f9b0c-1234-5678-9abc-def012345678
+X-PSPRelay-Routing-Mode: direct
+X-PSPRelay-Signature: 8f3c7e92b5a1b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef
+X-PSPRelay-Retry-Attempt: 1
+X-Paystack-Signature: 68673752e2e92c... (original PSP headers preserved)
+
+{
+  "event": "charge.success",
+  "data": { ... }
 }
 ```
 
-```python
-import hmac, hashlib
+#### Relayed Headers Reference
 
-def verify_relay_signature(body: bytes, header: str, signature_key: str) -> bool:
-    expected = hmac.new(signature_key.encode(), body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, header.lower())
+| Header | Delivery | Description |
+|---|---|---|
+| `Content-Type` | Always | Set to `application/json` |
+| `X-PSP-Provider` | Always | Source PSP name: `paystack`, `flutterwave`, or `monnify` |
+| `X-PSPRelay-Event-ID` | Always | Unique, durable Relay event ID. **Use this as your primary idempotency deduplication key.** |
+| `X-PSPRelay-Routing-Mode` | Always | Routing classification: `direct` (matched by reference token/prefix) or `broadcast` |
+| `X-PSPRelay-Signature` | When configured | Hex-encoded HMAC-SHA256 signature of the raw body generated with your product's `signatureKey` |
+| `X-PSPRelay-Retry-Attempt` | On retries only | The current retry attempt counter (`1`, `2`, `3`) |
+| Original PSP Headers | Always | Preserved from incoming PSP request (e.g., `X-Paystack-Signature`, `verif-hash`, `monnify-signature`), excluding hop-by-hop headers |
+
+---
+
+### Concrete Payload Examples
+
+#### Example: Paystack Relayed Payload
+
+A Paystack `charge.success` forwarded to your product endpoint:
+
+```http
+POST /v1/webhooks/psp HTTP/1.1
+Content-Type: application/json
+X-PSP-Provider: paystack
+X-PSPRelay-Event-ID: 104a2311-5160-42ad-b62c-98f304c78d0a
+X-PSPRelay-Routing-Mode: direct
+X-PSPRelay-Signature: a1b2c3d4e5f67890123456789abcdef0123456789abcdef0123456789abcdef0
+X-Paystack-Signature: 9c8b7a6e5d4c3b2a10987654321fedcba0987654321fedcba0987654321fedcb
+
+{
+  "event": "charge.success",
+  "data": {
+    "id": 3029482910,
+    "domain": "live",
+    "status": "success",
+    "reference": "3f9a1c0be27d_inv_982341",
+    "amount": 2500000,
+    "message": null,
+    "gateway_response": "Successful",
+    "paid_at": "2026-11-14T11:00:22.000Z",
+    "created_at": "2026-11-14T10:59:45.000Z",
+    "channel": "card",
+    "currency": "NGN",
+    "ip_address": "102.89.34.12",
+    "metadata": {
+      "customer_id": "usr_94812",
+      "plan": "enterprise"
+    },
+    "customer": {
+      "id": 849201,
+      "email": "billing@example.com",
+      "customer_code": "CUS_xxxxxxxxxx"
+    }
+  }
+}
+```
+
+#### Example: Flutterwave Relayed Payload
+
+A Flutterwave `charge.completed` forwarded to your product endpoint:
+
+```http
+POST /v1/webhooks/psp HTTP/1.1
+Content-Type: application/json
+X-PSP-Provider: flutterwave
+X-PSPRelay-Event-ID: 29bc4891-9102-4bc1-aa01-491203498a12
+X-PSPRelay-Routing-Mode: direct
+X-PSPRelay-Signature: f9e8d7c6b5a43210fedcba9876543210fedcba9876543210fedcba9876543210
+verif-hash: flw_sec_hash_xxxxxxxxxxxxx
+
+{
+  "event": "charge.completed",
+  "data": {
+    "id": 8941235,
+    "tx_ref": "MN_sub_order_48210",
+    "flw_ref": "FLW-MOCK-8941235",
+    "amount": 50000,
+    "currency": "NGN",
+    "charged_amount": 50000,
+    "status": "successful",
+    "payment_type": "bank_transfer",
+    "created_at": "2026-11-14T11:15:00.000Z",
+    "customer": {
+      "id": 91823,
+      "name": "Jane Doe",
+      "email": "jane@example.com"
+    }
+  }
+}
+```
+
+#### Example: Monnify Relayed Payload
+
+A Monnify `SUCCESSFUL_TRANSACTION` forwarded to your product endpoint:
+
+```http
+POST /v1/webhooks/psp HTTP/1.1
+Content-Type: application/json
+X-PSP-Provider: monnify
+X-PSPRelay-Event-ID: c56a7d8e-9012-43fa-876b-123456789abc
+X-PSPRelay-Routing-Mode: direct
+X-PSPRelay-Signature: b4c3d2e1f0a987654321fedcba0987654321fedcba0987654321fedcba098765
+monnify-signature: 4a5b6c7d8e9f0123456789abcdef0123456789abcdef0123456789abcdef0123
+
+{
+  "eventType": "SUCCESSFUL_TRANSACTION",
+  "eventData": {
+    "product": {
+      "reference": "MN_res_acc_39201",
+      "type": "RESERVED_ACCOUNT"
+    },
+    "transactionReference": "MNFY|20261114|9840213",
+    "paymentReference": "MN_res_acc_39201",
+    "amountPaid": "10000.00",
+    "totalPayable": "10000.00",
+    "settlementAmount": "9850.00",
+    "paidOn": "14/11/2026 11:20:15 AM",
+    "paymentStatus": "PAID",
+    "paymentMethod": "ACCOUNT_TRANSFER",
+    "currency": "NGN",
+    "customer": {
+      "name": "Acme Corp",
+      "email": "finance@acme.com"
+    }
+  }
+}
+```
+
+---
+
+## Downstream Integration
+
+Integrating your backend service with PSP Relay requires adhering to 3 core operational principles:
+
+1. **Verify Relay Signature:** Validate `X-PSPRelay-Signature` using constant-time HMAC-SHA256 comparison against your product's configured `signatureKey`.
+2. **Idempotency Deduplication:** Record and check `X-PSPRelay-Event-ID` in a database table or cache before processing payment fulfillment. Delivery is **at-least-once**, so duplicate deliveries may occur on retries or consumer rebalancing.
+3. **Fast 2xx Acknowledgment (< 5s):** A delivery is considered successful when your endpoint returns an HTTP status code between `200` and `299` within **5 seconds**. If your business logic involves long-running tasks (e.g. invoicing, dispatching emails, provisioning VMs), acknowledge the webhook with `200 OK` immediately and offload the work to an asynchronous background worker.
+
+### Integration Examples
+
+#### Go
+
+```go
+package main
+
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"io"
+	"net/http"
+	"strings"
+)
+
+const ProductSignatureKey = "sec_sig_mn_83901kd8"
+
+func verifyRelaySignature(body []byte, headerSig, secret string) bool {
+	if headerSig == "" || secret == "" {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	expectedHex := hex.EncodeToString(mac.Sum(nil))
+	return hmac.Equal([]byte(expectedHex), []byte(strings.ToLower(headerSig)))
+}
+
+func handlePSPWebhook(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "cannot read body", http.StatusBadRequest)
+		return
+	}
+
+	// 1. Verify X-PSPRelay-Signature
+	sigHeader := r.Header.Get("X-PSPRelay-Signature")
+	if !verifyRelaySignature(body, sigHeader, ProductSignatureKey) {
+		http.Error(w, "invalid signature", http.StatusUnauthorized)
+		return
+	}
+
+	// 2. Extract Event ID & Provider
+	eventID := r.Header.Get("X-PSPRelay-Event-ID")
+	provider := r.Header.Get("X-PSP-Provider")
+
+	// 3. Idempotency Check (e.g. INSERT ... ON CONFLICT DO NOTHING)
+	if isDuplicateEvent(r.Context(), eventID) {
+		w.WriteHeader(http.StatusOK) // Acknowledge duplicate without re-processing
+		return
+	}
+
+	// 4. Parse PSP Payload & Enqueue Business Logic
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+
+	// Offload fulfillment to background worker (e.g. credit wallet, activate subscription)
+	enqueuePaymentProcessing(eventID, provider, payload)
+
+	// 5. Fast 200 OK Response (< 5s)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"status":"received"}`))
+}
+```
+
+#### Node.js / TypeScript (Express)
+
+```typescript
+import express, { Request, Response } from 'express';
+import crypto from 'crypto';
+
+const app = express();
+const SIGNATURE_KEY = process.env.PSP_RELAY_SIGNATURE_KEY || 'sec_sig_mn_83901kd8';
+
+// Use raw body buffer for accurate cryptographic signature validation
+app.post(
+  '/v1/webhooks/psp',
+  express.raw({ type: 'application/json' }),
+  async (req: Request, res: Response) => {
+    const rawBody = req.body as Buffer;
+    const signature = req.header('X-PSPRelay-Signature');
+    const eventId = req.header('X-PSPRelay-Event-ID');
+    const provider = req.header('X-PSP-Provider');
+
+    // 1. Verify Relay HMAC-SHA256 Signature
+    if (!signature) {
+      return res.status(401).json({ error: 'missing signature header' });
+    }
+
+    const expectedSignature = crypto
+      .createHmac('sha256', SIGNATURE_KEY)
+      .update(rawBody)
+      .digest('hex');
+
+    const isValid = crypto.timingSafeEqual(
+      Buffer.from(signature.toLowerCase()),
+      Buffer.from(expectedSignature)
+    );
+
+    if (!isValid) {
+      return res.status(401).json({ error: 'invalid signature' });
+    }
+
+    // 2. Idempotency Check
+    const alreadyProcessed = await checkAndMarkProcessed(eventId);
+    if (alreadyProcessed) {
+      return res.status(200).json({ status: 'already_processed' });
+    }
+
+    // 3. Parse JSON & Enqueue Worker Task
+    const event = JSON.parse(rawBody.toString('utf8'));
+    await paymentQueue.add('fulfill_payment', {
+      eventId,
+      provider,
+      data: event.data || event.eventData,
+    });
+
+    // 4. Fast 200 OK Response (< 5s timeout)
+    return res.status(200).json({ status: 'accepted' });
+  }
+);
+```
+
+#### Python (FastAPI)
+
+```python
+import hmac
+import hashlib
+from fastapi import FastAPI, Request, Header, HTTPException, status
+from fastapi.responses import JSONResponse
+
+app = FastAPI()
+SIGNATURE_KEY = "sec_sig_mn_83901kd8"
+
+def verify_relay_signature(raw_body: bytes, header_sig: str, key: str) -> bool:
+    if not header_sig:
+        return False
+    expected = hmac.new(key.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected.lower(), header_sig.lower())
+
+@app.post("/v1/webhooks/psp")
+async def handle_psp_webhook(
+    request: Request,
+    x_psprelay_signature: str = Header(None),
+    x_psprelay_event_id: str = Header(None),
+    x_psp_provider: str = Header(None)
+):
+    raw_body = await request.body()
+
+    # 1. Verify Relay Signature
+    if not verify_relay_signature(raw_body, x_psprelay_signature, SIGNATURE_KEY):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid relay signature"
+        )
+
+    # 2. Idempotency Check
+    if await is_event_already_processed(x_psprelay_event_id):
+        return JSONResponse(status_code=status.HTTP_200_OK, content={"status": "duplicate"})
+
+    # 3. Offload processing to background task (Celery / ARQ / Redis)
+    payload = await request.json()
+    await background_payment_tasks.enqueue(x_psprelay_event_id, x_psp_provider, payload)
+
+    # 4. Immediate 200 OK Response (< 5s)
+    return JSONResponse(status_code=status.HTTP_200_OK, content={"status": "accepted"})
 ```
 
 ---
