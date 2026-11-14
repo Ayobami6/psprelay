@@ -37,7 +37,7 @@ Most PSP dashboards let you register only one webhook URL per account. If severa
 - ♻️ **Idempotent ingestion**: duplicate PSP deliveries are dropped using a `UNIQUE (provider, provider_event_id)` constraint.
 - 📦 **Transactional outbox**: each event is saved before it is published. If Kafka is down, an outbox worker publishes `PENDING` events once it recovers.
 - 🚀 **Kafka-buffered fan-out**: the ingress HTTP path and the slow outbound delivery path are separated by a Kafka topic, with messages keyed by payment reference so events for the same reference stay in order.
-- 🎯 **Deterministic product routing**: a product is chosen by an HMAC-derived prefix token or a raw prefix in the payment reference. DVA / bank-transfer events with no matching prefix are broadcast to all products.
+- 🎯 **Deterministic product routing**: a product is chosen by an HMAC-derived prefix token or a raw prefix in the payment reference. Events without a matching prefix fail closed to the DLQ.
 - 🔁 **Non-blocking retries**: failed deliveries are retried by a separate worker, up to 3 times, with exponential backoff and jitter. Retries never block the Kafka consumer.
 - ☠️ **Dead-letter queue**: deliveries that run out of retries, and events that match no product, go to a DLQ topic for manual review or replay.
 - ✍️ **Signed outbound requests**: every forwarded webhook can carry an `X-PSPRelay-Signature` (HMAC-SHA256) so downstream services can check it.
@@ -176,8 +176,7 @@ Each product is defined in [`config.yaml`](config.yaml). When a webhook is consu
 
    Example: `3f9a1c0be27d_TX-000123`. The token reveals neither the product name nor its prefix.
 2. **Raw prefix (fallback).** The part of the reference before the first `_` or `-` equals the product's `prefix`, ignoring case (e.g. `MN_12345` → `mailnow`).
-3. **DVA broadcast.** If nothing matches and the event is a dedicated virtual account / bank transfer, it is sent to **every** configured product, in alphabetical order. Those requests carry `X-PSPRelay-Routing-Mode: broadcast-dva`.
-4. **Unmatched.** Anything else is recorded as a `FAILED` delivery (`422`), the event is marked `FAILED`, and it is published to the DLQ.
+3. **Unmatched.** Anything else (including DVA / static bank transfer webhooks without a matching prefix) is recorded as a `FAILED` delivery (`422`), the event is marked `FAILED`, and it is published to the DLQ.
 
 > **Reference extraction:** each provider service picks the best candidate reference. If the PSP's main reference has no `_`/`-` separator (for example a random NIP reference) but a metadata reference does (`metadata.reference`, `tx_ref`, `accountReference`, `product.reference`), the metadata reference is used.
 
@@ -280,7 +279,7 @@ Product endpoints get a `POST` containing the **original, unmodified PSP payload
 |---|---|
 | `X-PSP-Provider` | Source provider (`paystack`, `flutterwave`, `monnify`) |
 | `X-PSPRelay-Event-ID` | Stable relay event ID. **Use it as your idempotency key.** |
-| `X-PSPRelay-Routing-Mode` | `direct` or `broadcast-dva` |
+| `X-PSPRelay-Routing-Mode` | `direct` |
 | `X-PSPRelay-Signature` | Hex HMAC-SHA256 of the raw body using the product's `signatureKey` (sent only when one is configured) |
 | `X-PSPRelay-Retry-Attempt` | Retry number (`1`–`3`), present on retries only |
 
@@ -478,7 +477,7 @@ erDiagram
         text product
         text endpoint_name
         text target_url
-        text routing_mode "direct | broadcast-dva | unmatched"
+        text routing_mode "direct | unmatched"
         jsonb headers
         bytea payload
         int status_code

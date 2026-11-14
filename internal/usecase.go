@@ -5,16 +5,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"sort"
 	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	RoutingModeDirect       = "direct"
-	RoutingModeBroadcastDVA = "broadcast-dva"
-	RoutingModeUnmatched    = "unmatched"
+	RoutingModeDirect    = "direct"
+	RoutingModeUnmatched = "unmatched"
 )
 
 type healthCheckUseCaseImpl struct {
@@ -312,25 +310,8 @@ func (u *dispatcherUseCaseImpl) resolveTargetProducts(event WebhookEvent) []targ
 		}
 	}
 
-	// 2. If DVA / static bank transfer webhook has no matching prefix, broadcast to all configured products
-	if event.IsDVA {
-		productNames := make([]string, 0, len(u.gatewayCfg.Products))
-		for name := range u.gatewayCfg.Products {
-			productNames = append(productNames, name)
-		}
-		sort.Strings(productNames)
-
-		routes := make([]targetProductRoute, 0, len(productNames))
-		for _, name := range productNames {
-			routes = append(routes, targetProductRoute{
-				ProductName: name,
-				Config:      u.gatewayCfg.Products[name],
-				RoutingMode: RoutingModeBroadcastDVA,
-			})
-		}
-		return routes
-	}
-
+	// Unmatched events (including DVA / static bank transfers without a product prefix)
+	// fail closed to handleUnmatchedWebhook -> DLQ rather than broadcasting to all products.
 	return nil
 }
 
