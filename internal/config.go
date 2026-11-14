@@ -38,6 +38,8 @@ type Config struct {
 	PaystackSecretKey     string
 	FlutterwaveSecretHash string
 	MonnifySecretKey      string
+	AdminUsername         string
+	AdminPassword         string
 	OutboxPollInterval    time.Duration
 	RetryPollInterval     time.Duration
 	RetryBaseBackoff      time.Duration
@@ -62,6 +64,9 @@ func LoadConfig() (*Config, error) {
 	flutterwaveSecret := getEnvFallback("FLUTTERWAVE_SECRET_HASH", "FlutterwaveSecretHash", "")
 	monnifySecret := getEnvFallback("MONNIFY_SECRET_KEY", "MonnifySecretKey", "")
 
+	adminUsername := getEnvFallback("ADMIN_USERNAME", "AdminUsername", "")
+	adminPassword := getEnvFallback("ADMIN_PASSWORD", "AdminPassword", "")
+
 	outboxPoll := parseDurationFallback(getEnvFallback("OUTBOX_POLL_INTERVAL", "OutboxPollInterval", "5s"), 5*time.Second)
 	retryPoll := parseDurationFallback(getEnvFallback("RETRY_POLL_INTERVAL", "RetryPollInterval", "2s"), 2*time.Second)
 	retryBackoff := parseDurationFallback(getEnvFallback("RETRY_BASE_BACKOFF", "RetryBaseBackoff", "5s"), 5*time.Second)
@@ -80,6 +85,8 @@ func LoadConfig() (*Config, error) {
 		PaystackSecretKey:     paystackSecret,
 		FlutterwaveSecretHash: flutterwaveSecret,
 		MonnifySecretKey:      monnifySecret,
+		AdminUsername:         adminUsername,
+		AdminPassword:         adminPassword,
 		OutboxPollInterval:    outboxPoll,
 		RetryPollInterval:     retryPoll,
 		RetryBaseBackoff:      retryBackoff,

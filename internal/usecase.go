@@ -56,29 +56,44 @@ type RelayService interface {
 }
 
 type relayServiceImpl struct {
-	store     WebhookStore
-	publisher EventPublisher
-	logger    *slog.Logger
+	store      WebhookStore
+	publisher  EventPublisher
+	gatewayCfg *GatewayConfig
+	logger     *slog.Logger
 }
 
 // NewRelayService constructs the ingress RelayService.
 func NewRelayService(store WebhookStore, publisher EventPublisher, logger *slog.Logger) RelayService {
+	return NewRelayServiceWithConfig(store, publisher, nil, logger)
+}
+
+// NewRelayServiceWithConfig constructs the ingress RelayService with product prefix matching at ingestion time.
+func NewRelayServiceWithConfig(store WebhookStore, publisher EventPublisher, gatewayCfg *GatewayConfig, logger *slog.Logger) RelayService {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &relayServiceImpl{
-		store:     store,
-		publisher: publisher,
-		logger:    logger,
+		store:      store,
+		publisher:  publisher,
+		gatewayCfg: gatewayCfg,
+		logger:     logger,
 	}
 }
 
 func (s *relayServiceImpl) Ingest(ctx context.Context, normalized *NormalizedWebhook) (*WebhookEvent, error) {
+	product := RoutingModeUnmatched
+	if s.gatewayCfg != nil {
+		if matchedProd, _, ok := s.gatewayCfg.MatchProductByReference(normalized.PaymentReference); ok {
+			product = matchedProd
+		}
+	}
+
 	event := &WebhookEvent{
 		Provider:         normalized.Provider,
 		ProviderEventID:  normalized.ProviderEventID,
 		EventType:        normalized.EventType,
 		PaymentReference: normalized.PaymentReference,
+		Product:          product,
 		IsDVA:            normalized.IsDVA,
 		Headers:          normalized.RawHeaders,
 		Payload:          normalized.RawPayload,
@@ -208,6 +223,11 @@ func (u *dispatcherUseCaseImpl) Execute(ctx context.Context, event WebhookEvent)
 	routes := u.resolveTargetProducts(event)
 	if len(routes) == 0 {
 		return u.handleUnmatchedWebhook(ctx, event)
+	}
+
+	primaryProduct := routes[0].ProductName
+	if event.Product != primaryProduct {
+		_ = u.store.UpdateEventProduct(ctx, event.ID, primaryProduct)
 	}
 
 	type endpointTask struct {

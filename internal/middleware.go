@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"crypto/subtle"
 	"errors"
 	"net/http"
 
@@ -70,7 +71,9 @@ func ErrorHandlerMiddleware() gin.HandlerFunc {
 		case errors.Is(err, ErrProductNotFound),
 			errors.Is(err, ErrEndpointNotFound),
 			errors.Is(err, ErrProviderNotFound),
-			errors.Is(err, ErrKeyNotFound):
+			errors.Is(err, ErrKeyNotFound),
+			errors.Is(err, ErrEventNotFound),
+			errors.Is(err, ErrFailureNotFound):
 			statusCode = http.StatusNotFound
 			detail = err.Error()
 
@@ -122,6 +125,29 @@ func CorsMiddleware() gin.HandlerFunc {
 
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(http.StatusNoContent)
+			return
+		}
+
+		c.Next()
+	}
+}
+
+// AdminAuthMiddleware enforces HTTP Basic Authentication on admin UI and REST routes
+// whenever username or password is configured. When both are empty, requests are allowed through.
+func AdminAuthMiddleware(username, password string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if username == "" && password == "" {
+			c.Next()
+			return
+		}
+
+		reqUser, reqPass, ok := c.Request.BasicAuth()
+		userMatch := subtle.ConstantTimeCompare([]byte(reqUser), []byte(username)) == 1
+		passMatch := subtle.ConstantTimeCompare([]byte(reqPass), []byte(password)) == 1
+		if !ok || !userMatch || !passMatch {
+			c.Header("WWW-Authenticate", `Basic realm="PSP Relay Admin"`)
+			pd := NewProblemDetails(http.StatusUnauthorized, "invalid or missing admin credentials")
+			pd.Respond(c)
 			return
 		}
 

@@ -269,6 +269,21 @@ Liveness and readiness check. Pings the backing store.
 | `200` | `{"status":"healthy","message":"All systems operational"}` |
 | `503` | `{"status":"degraded","error":"<reason>"}` |
 
+### Management Console (`/admin`) & Admin API (`/v1/admin/*`)
+
+PSP Relay includes an embedded, server-rendered HTMX Management UI at `/admin` and JSON endpoints under `/v1/admin/*` (protected by HTTP Basic Auth whenever `ADMIN_USERNAME` and `ADMIN_PASSWORD` are configured):
+
+| Endpoint | Description |
+|---|---|
+| `GET /admin` | Interactive HTMX Management Console (per-product telemetry cards, filterable webhook events table, payload/headers inspector drawer, and delivery failures table with retry controls) |
+| `GET /v1/admin/overview` | Aggregated per-product event & failure metrics (`total_events`, `delivered_events`, `active_retries`, `dead_letter_count`) |
+| `GET /v1/admin/events` | Paginated `webhook_events` filtered by `product`, `provider`, `status`, and `q` (payment reference / event ID) |
+| `GET /v1/admin/events/:id` | Detailed event view including pretty-printed JSON payload, headers, and delivery failure history |
+| `POST /v1/admin/events/:id/replay` | Replays a webhook event synchronously across its target product endpoints |
+| `GET /v1/admin/failures` | Paginated `delivery_failures` filtered by `product`, `provider`, `status`, and `event_id` |
+| `POST /v1/admin/failures/:id/retry` | Executes an immediate synchronous HTTP retry for a single delivery failure (and re-evaluates `config.yaml` routing if the failure was `unmatched`) |
+| `POST /v1/admin/failures/bulk-retry` | Resets matching `FAILED` / `RETRYING` rows to `RETRYING` (`retry_count = 0`, `next_retry_at = NOW()`) for asynchronous background processing |
+
 ---
 
 ## Downstream Integration
@@ -401,7 +416,7 @@ ADDR=:8083
 LOG_LEVEL=debug
 CONFIG_FILE_PATH=./config.yaml
 DATABASE_URL=postgres://psprelay:psprelay_password@localhost:5432/psprelay?sslmode=disable
-KAFKA_BROKERS=localhost:9092
+KAFKA_BROKERS=localhost:9094
 PAYSTACK_SECRET_KEY=sk_test_xxx
 FLUTTERWAVE_SECRET_HASH=my-flw-hash
 MONNIFY_SECRET_KEY=monnify-secret
@@ -411,7 +426,7 @@ make run              # or `make dev` for hot reload with air
 ```
 
 > [!NOTE]
-> The Compose Kafka broker advertises `kafka:9092`. To connect from the host, add `127.0.0.1 kafka` to `/etc/hosts` or change `KAFKA_ADVERTISED_LISTENERS`.
+> The Compose Kafka service exposes external host access on port `9094` (configurable via `KAFKA_PORT`) and internal container communication on `kafka:9092`. Host apps can connect directly using `localhost:9094`.
 
 The database schema (tables and indexes) is created automatically at startup with `CREATE TABLE IF NOT EXISTS`.
 

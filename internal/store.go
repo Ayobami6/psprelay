@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,6 +43,7 @@ type WebhookEvent struct {
 	ProviderEventID  string            `json:"provider_event_id"`
 	EventType        string            `json:"event_type"`
 	PaymentReference string            `json:"payment_reference"`
+	Product          string            `json:"product"`
 	IsDVA            bool              `json:"is_dva"`
 	Headers          map[string]string `json:"headers"`
 	Payload          []byte            `json:"payload"`
@@ -79,17 +81,57 @@ type RetryAttemptResult struct {
 	NextRetryAt  time.Time
 }
 
+// EventFilter specifies filtering and pagination parameters for listing webhook events.
+type EventFilter struct {
+	Product  string
+	Provider PSPProvider
+	Status   WebhookStatus
+	Search   string
+	Limit    int
+	Offset   int
+}
+
+// FailureFilter specifies filtering and pagination parameters for listing delivery failures.
+type FailureFilter struct {
+	Product  string
+	Provider PSPProvider
+	Status   DeliveryFailureStatus
+	EventID  string
+	Limit    int
+	Offset   int
+}
+
+// ProductMetrics holds aggregated event and delivery failure counts for a product.
+type ProductMetrics struct {
+	Product         string `json:"product"`
+	Prefix          string `json:"prefix"`
+	EndpointCount   int    `json:"endpoint_count"`
+	TotalEvents     int    `json:"total_events"`
+	DeliveredEvents int    `json:"delivered_events"`
+	PendingEvents   int    `json:"pending_events"`
+	FailedEvents    int    `json:"failed_events"`
+	ActiveRetries   int    `json:"active_retries"`
+	DeadLetterCount int    `json:"dead_letter_count"`
+}
+
 // WebhookStore defines the secondary port for webhook persistence, transactional outbox, and retry/failure storage.
 type WebhookStore interface {
 	EnsureSchema(ctx context.Context) error
 	SaveEvent(ctx context.Context, event *WebhookEvent) (saved *WebhookEvent, duplicate bool, err error)
 	GetEvent(ctx context.Context, eventID string) (*WebhookEvent, error)
 	UpdateStatus(ctx context.Context, eventID string, status WebhookStatus) error
+	UpdateEventProduct(ctx context.Context, eventID string, product string) error
 	ClaimPendingOutboxEvents(ctx context.Context, olderThan time.Duration, limit int, fn func(ctx context.Context, events []WebhookEvent) ([]string, error)) error
 	EnqueueDeliveryFailure(ctx context.Context, failure *DeliveryFailure) error
 	ClaimDueRetries(ctx context.Context, now time.Time, limit int, fn func(ctx context.Context, item DeliveryFailure) RetryAttemptResult) ([]DeliveryFailure, error)
 	ListDeliveryFailures(ctx context.Context, eventID string) ([]DeliveryFailure, error)
 	HasPendingOrFailedDeliveries(ctx context.Context, eventID string) (hasRetrying bool, hasFailed bool, err error)
+	ListEvents(ctx context.Context, filter EventFilter) ([]WebhookEvent, int, error)
+	ListAllDeliveryFailures(ctx context.Context, filter FailureFilter) ([]DeliveryFailure, int, error)
+	GetDeliveryFailure(ctx context.Context, failureID string) (*DeliveryFailure, error)
+	UpdateDeliveryFailureAttempt(ctx context.Context, failure *DeliveryFailure) error
+	ResetFailuresForRetry(ctx context.Context, product string, provider PSPProvider) (int, error)
+	GetProductMetrics(ctx context.Context) (map[string]ProductMetrics, error)
 	Ping(ctx context.Context) error
 	Close()
 }
@@ -140,6 +182,7 @@ CREATE TABLE IF NOT EXISTS webhook_events (
 	provider_event_id TEXT NOT NULL,
 	event_type TEXT NOT NULL,
 	payment_reference TEXT NOT NULL,
+	product TEXT NOT NULL DEFAULT 'unmatched',
 	is_dva BOOLEAN NOT NULL DEFAULT FALSE,
 	headers JSONB NOT NULL DEFAULT '{}'::jsonb,
 	payload BYTEA NOT NULL,
@@ -149,9 +192,14 @@ CREATE TABLE IF NOT EXISTS webhook_events (
 	UNIQUE (provider, provider_event_id)
 );
 
+ALTER TABLE webhook_events ADD COLUMN IF NOT EXISTS product TEXT NOT NULL DEFAULT 'unmatched';
+
 CREATE INDEX IF NOT EXISTS idx_webhook_events_outbox
 	ON webhook_events (created_at ASC)
 	WHERE status = 'PENDING';
+
+CREATE INDEX IF NOT EXISTS idx_webhook_events_product_created
+	ON webhook_events (product, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS delivery_failures (
 	id TEXT PRIMARY KEY,
@@ -179,6 +227,9 @@ CREATE INDEX IF NOT EXISTS idx_delivery_failures_due_retries
 
 CREATE INDEX IF NOT EXISTS idx_delivery_failures_event_id
 	ON delivery_failures (event_id);
+
+CREATE INDEX IF NOT EXISTS idx_delivery_failures_product_status
+	ON delivery_failures (product, status, updated_at DESC);
 `
 	_, err := s.pool.Exec(ctx, ddl)
 	if err != nil {
@@ -199,6 +250,9 @@ func (s *PostgresWebhookStore) SaveEvent(ctx context.Context, event *WebhookEven
 	if event.Status == "" {
 		event.Status = WebhookStatusPending
 	}
+	if strings.TrimSpace(event.Product) == "" {
+		event.Product = RoutingModeUnmatched
+	}
 
 	headersJSON, err := json.Marshal(event.Headers)
 	if err != nil {
@@ -207,8 +261,8 @@ func (s *PostgresWebhookStore) SaveEvent(ctx context.Context, event *WebhookEven
 
 	insertQuery := `
 INSERT INTO webhook_events (
-	id, provider, provider_event_id, event_type, payment_reference, is_dva, headers, payload, status, created_at, updated_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	id, provider, provider_event_id, event_type, payment_reference, product, is_dva, headers, payload, status, created_at, updated_at
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 ON CONFLICT (provider, provider_event_id) DO NOTHING
 RETURNING id, status, created_at, updated_at
 `
@@ -222,6 +276,7 @@ RETURNING id, status, created_at, updated_at
 		event.ProviderEventID,
 		event.EventType,
 		event.PaymentReference,
+		event.Product,
 		event.IsDVA,
 		headersJSON,
 		event.Payload,
@@ -249,7 +304,7 @@ RETURNING id, status, created_at, updated_at
 
 func (s *PostgresWebhookStore) getEventByProviderKey(ctx context.Context, provider PSPProvider, providerEventID string) (*WebhookEvent, error) {
 	query := `
-SELECT id, provider, provider_event_id, event_type, payment_reference, is_dva, headers, payload, status, created_at, updated_at
+SELECT id, provider, provider_event_id, event_type, payment_reference, product, is_dva, headers, payload, status, created_at, updated_at
 FROM webhook_events
 WHERE provider = $1 AND provider_event_id = $2
 `
@@ -258,11 +313,15 @@ WHERE provider = $1 AND provider_event_id = $2
 
 func (s *PostgresWebhookStore) GetEvent(ctx context.Context, eventID string) (*WebhookEvent, error) {
 	query := `
-SELECT id, provider, provider_event_id, event_type, payment_reference, is_dva, headers, payload, status, created_at, updated_at
+SELECT id, provider, provider_event_id, event_type, payment_reference, product, is_dva, headers, payload, status, created_at, updated_at
 FROM webhook_events
 WHERE id = $1
 `
-	return s.scanEvent(s.pool.QueryRow(ctx, query, eventID))
+	ev, err := s.scanEvent(s.pool.QueryRow(ctx, query, eventID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrEventNotFound
+	}
+	return ev, err
 }
 
 func (s *PostgresWebhookStore) scanEvent(row pgx.Row) (*WebhookEvent, error) {
@@ -277,6 +336,7 @@ func (s *PostgresWebhookStore) scanEvent(row pgx.Row) (*WebhookEvent, error) {
 		&ev.ProviderEventID,
 		&ev.EventType,
 		&ev.PaymentReference,
+		&ev.Product,
 		&ev.IsDVA,
 		&headersJSON,
 		&ev.Payload,
@@ -289,6 +349,9 @@ func (s *PostgresWebhookStore) scanEvent(row pgx.Row) (*WebhookEvent, error) {
 	}
 	ev.Provider = PSPProvider(providerStr)
 	ev.Status = WebhookStatus(statusStr)
+	if ev.Product == "" {
+		ev.Product = RoutingModeUnmatched
+	}
 	_ = json.Unmarshal(headersJSON, &ev.Headers)
 	return &ev, nil
 }
@@ -296,6 +359,15 @@ func (s *PostgresWebhookStore) scanEvent(row pgx.Row) (*WebhookEvent, error) {
 func (s *PostgresWebhookStore) UpdateStatus(ctx context.Context, eventID string, status WebhookStatus) error {
 	query := `UPDATE webhook_events SET status = $1, updated_at = $2 WHERE id = $3`
 	_, err := s.pool.Exec(ctx, query, string(status), time.Now().UTC(), eventID)
+	return err
+}
+
+func (s *PostgresWebhookStore) UpdateEventProduct(ctx context.Context, eventID string, product string) error {
+	if strings.TrimSpace(product) == "" {
+		product = RoutingModeUnmatched
+	}
+	query := `UPDATE webhook_events SET product = $1, updated_at = $2 WHERE id = $3`
+	_, err := s.pool.Exec(ctx, query, product, time.Now().UTC(), eventID)
 	return err
 }
 
@@ -315,7 +387,7 @@ func (s *PostgresWebhookStore) ClaimPendingOutboxEvents(
 
 	cutoff := time.Now().UTC().Add(-olderThan)
 	query := `
-SELECT id, provider, provider_event_id, event_type, payment_reference, is_dva, headers, payload, status, created_at, updated_at
+SELECT id, provider, provider_event_id, event_type, payment_reference, product, is_dva, headers, payload, status, created_at, updated_at
 FROM webhook_events
 WHERE status = 'PENDING' AND created_at <= $1
 ORDER BY created_at ASC
@@ -338,6 +410,7 @@ FOR UPDATE SKIP LOCKED
 			&ev.ProviderEventID,
 			&ev.EventType,
 			&ev.PaymentReference,
+			&ev.Product,
 			&ev.IsDVA,
 			&headersJSON,
 			&ev.Payload,
@@ -350,6 +423,9 @@ FOR UPDATE SKIP LOCKED
 		}
 		ev.Provider = PSPProvider(providerStr)
 		ev.Status = WebhookStatus(statusStr)
+		if ev.Product == "" {
+			ev.Product = RoutingModeUnmatched
+		}
 		_ = json.Unmarshal(headersJSON, &ev.Headers)
 		events = append(events, ev)
 	}
@@ -546,6 +622,10 @@ ORDER BY created_at ASC
 	}
 	defer rows.Close()
 
+	return s.scanDeliveryFailureRows(rows)
+}
+
+func (s *PostgresWebhookStore) scanDeliveryFailureRows(rows pgx.Rows) ([]DeliveryFailure, error) {
 	var result []DeliveryFailure
 	for rows.Next() {
 		var item DeliveryFailure
@@ -591,6 +671,342 @@ WHERE event_id = $1
 	var hasRetrying, hasFailed bool
 	err := s.pool.QueryRow(ctx, query, eventID).Scan(&hasRetrying, &hasFailed)
 	return hasRetrying, hasFailed, err
+}
+
+func (s *PostgresWebhookStore) ListEvents(ctx context.Context, filter EventFilter) ([]WebhookEvent, int, error) {
+	limit := filter.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+
+	var clauses []string
+	var args []any
+	argIdx := 1
+
+	if filter.Product != "" {
+		clauses = append(clauses, fmt.Sprintf("product = $%d", argIdx))
+		args = append(args, filter.Product)
+		argIdx++
+	}
+	if filter.Provider != "" {
+		clauses = append(clauses, fmt.Sprintf("provider = $%d", argIdx))
+		args = append(args, string(filter.Provider))
+		argIdx++
+	}
+	if filter.Status != "" {
+		clauses = append(clauses, fmt.Sprintf("status = $%d", argIdx))
+		args = append(args, string(filter.Status))
+		argIdx++
+	}
+	if q := strings.TrimSpace(filter.Search); q != "" {
+		clauses = append(clauses, fmt.Sprintf("(payment_reference ILIKE $%d OR provider_event_id ILIKE $%d OR id ILIKE $%d)", argIdx, argIdx, argIdx))
+		args = append(args, "%"+q+"%")
+		argIdx++
+	}
+
+	whereSQL := ""
+	if len(clauses) > 0 {
+		whereSQL = "WHERE " + strings.Join(clauses, " AND ")
+	}
+
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM webhook_events %s", whereSQL)
+	var total int
+	if err := s.pool.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("counting webhook events: %w", err)
+	}
+
+	listArgs := append(append([]any(nil), args...), limit, offset)
+	listQuery := fmt.Sprintf(`
+SELECT id, provider, provider_event_id, event_type, payment_reference, product, is_dva, headers, payload, status, created_at, updated_at
+FROM webhook_events
+%s
+ORDER BY created_at DESC
+LIMIT $%d OFFSET $%d
+`, whereSQL, argIdx, argIdx+1)
+
+	rows, err := s.pool.Query(ctx, listQuery, listArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("querying webhook events: %w", err)
+	}
+	defer rows.Close()
+
+	var events []WebhookEvent
+	for rows.Next() {
+		var ev WebhookEvent
+		var providerStr, statusStr string
+		var headersJSON []byte
+		if scanErr := rows.Scan(
+			&ev.ID,
+			&providerStr,
+			&ev.ProviderEventID,
+			&ev.EventType,
+			&ev.PaymentReference,
+			&ev.Product,
+			&ev.IsDVA,
+			&headersJSON,
+			&ev.Payload,
+			&statusStr,
+			&ev.CreatedAt,
+			&ev.UpdatedAt,
+		); scanErr != nil {
+			return nil, 0, scanErr
+		}
+		ev.Provider = PSPProvider(providerStr)
+		ev.Status = WebhookStatus(statusStr)
+		if ev.Product == "" {
+			ev.Product = RoutingModeUnmatched
+		}
+		_ = json.Unmarshal(headersJSON, &ev.Headers)
+		events = append(events, ev)
+	}
+
+	return events, total, rows.Err()
+}
+
+func (s *PostgresWebhookStore) ListAllDeliveryFailures(ctx context.Context, filter FailureFilter) ([]DeliveryFailure, int, error) {
+	limit := filter.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+
+	var clauses []string
+	var args []any
+	argIdx := 1
+
+	if filter.Product != "" {
+		clauses = append(clauses, fmt.Sprintf("product = $%d", argIdx))
+		args = append(args, filter.Product)
+		argIdx++
+	}
+	if filter.Provider != "" {
+		clauses = append(clauses, fmt.Sprintf("provider = $%d", argIdx))
+		args = append(args, string(filter.Provider))
+		argIdx++
+	}
+	if filter.Status != "" {
+		clauses = append(clauses, fmt.Sprintf("status = $%d", argIdx))
+		args = append(args, string(filter.Status))
+		argIdx++
+	}
+	if filter.EventID != "" {
+		clauses = append(clauses, fmt.Sprintf("event_id = $%d", argIdx))
+		args = append(args, filter.EventID)
+		argIdx++
+	}
+
+	whereSQL := ""
+	if len(clauses) > 0 {
+		whereSQL = "WHERE " + strings.Join(clauses, " AND ")
+	}
+
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM delivery_failures %s", whereSQL)
+	var total int
+	if err := s.pool.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("counting delivery failures: %w", err)
+	}
+
+	listArgs := append(append([]any(nil), args...), limit, offset)
+	listQuery := fmt.Sprintf(`
+SELECT id, event_id, provider, product, endpoint_name, target_url, routing_mode,
+       headers, payload, status_code, error_message, retry_count, max_retries, status, next_retry_at, created_at, updated_at
+FROM delivery_failures
+%s
+ORDER BY updated_at DESC
+LIMIT $%d OFFSET $%d
+`, whereSQL, argIdx, argIdx+1)
+
+	rows, err := s.pool.Query(ctx, listQuery, listArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("querying delivery failures: %w", err)
+	}
+	defer rows.Close()
+
+	failures, scanErr := s.scanDeliveryFailureRows(rows)
+	if scanErr != nil {
+		return nil, 0, scanErr
+	}
+	return failures, total, nil
+}
+
+func (s *PostgresWebhookStore) GetDeliveryFailure(ctx context.Context, failureID string) (*DeliveryFailure, error) {
+	query := `
+SELECT id, event_id, provider, product, endpoint_name, target_url, routing_mode,
+       headers, payload, status_code, error_message, retry_count, max_retries, status, next_retry_at, created_at, updated_at
+FROM delivery_failures
+WHERE id = $1
+`
+	var item DeliveryFailure
+	var providerStr, statusStr string
+	var headersJSON []byte
+	err := s.pool.QueryRow(ctx, query, failureID).Scan(
+		&item.ID,
+		&item.EventID,
+		&providerStr,
+		&item.Product,
+		&item.EndpointName,
+		&item.TargetURL,
+		&item.RoutingMode,
+		&headersJSON,
+		&item.Payload,
+		&item.StatusCode,
+		&item.ErrorMessage,
+		&item.RetryCount,
+		&item.MaxRetries,
+		&statusStr,
+		&item.NextRetryAt,
+		&item.CreatedAt,
+		&item.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrFailureNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	item.Provider = PSPProvider(providerStr)
+	item.Status = DeliveryFailureStatus(statusStr)
+	_ = json.Unmarshal(headersJSON, &item.Headers)
+	return &item, nil
+}
+
+func (s *PostgresWebhookStore) UpdateDeliveryFailureAttempt(ctx context.Context, failure *DeliveryFailure) error {
+	now := time.Now().UTC()
+	failure.UpdatedAt = now
+	query := `
+UPDATE delivery_failures
+SET retry_count = $1, max_retries = $2, status_code = $3, error_message = $4, status = $5, next_retry_at = $6, updated_at = $7
+WHERE id = $8
+`
+	tag, err := s.pool.Exec(
+		ctx,
+		query,
+		failure.RetryCount,
+		failure.MaxRetries,
+		failure.StatusCode,
+		failure.ErrorMessage,
+		string(failure.Status),
+		failure.NextRetryAt,
+		failure.UpdatedAt,
+		failure.ID,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrFailureNotFound
+	}
+	return nil
+}
+
+func (s *PostgresWebhookStore) ResetFailuresForRetry(ctx context.Context, product string, provider PSPProvider) (int, error) {
+	now := time.Now().UTC()
+	var clauses []string
+	clauses = append(clauses, "status IN ('FAILED', 'RETRYING')", "target_url <> ''")
+
+	var args []any
+	args = append(args, now)
+	argIdx := 2
+
+	if product != "" {
+		clauses = append(clauses, fmt.Sprintf("product = $%d", argIdx))
+		args = append(args, product)
+		argIdx++
+	}
+	if provider != "" {
+		clauses = append(clauses, fmt.Sprintf("provider = $%d", argIdx))
+		args = append(args, string(provider))
+	}
+
+	whereSQL := strings.Join(clauses, " AND ")
+	query := fmt.Sprintf(`
+UPDATE delivery_failures
+SET status = 'RETRYING', retry_count = 0, max_retries = GREATEST(max_retries, 3), next_retry_at = $1, updated_at = $1
+WHERE %s
+`, whereSQL)
+
+	tag, err := s.pool.Exec(ctx, query, args...)
+	if err != nil {
+		return 0, fmt.Errorf("resetting failures for retry: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+func (s *PostgresWebhookStore) GetProductMetrics(ctx context.Context) (map[string]ProductMetrics, error) {
+	metrics := make(map[string]ProductMetrics)
+
+	eventQuery := `
+SELECT
+	COALESCE(NULLIF(product, ''), 'unmatched') AS prod,
+	COUNT(*) AS total,
+	COUNT(*) FILTER (WHERE status = 'DELIVERED') AS delivered,
+	COUNT(*) FILTER (WHERE status IN ('PENDING', 'PUBLISHED')) AS pending,
+	COUNT(*) FILTER (WHERE status = 'FAILED') AS failed
+FROM webhook_events
+GROUP BY prod
+`
+	evRows, err := s.pool.Query(ctx, eventQuery)
+	if err != nil {
+		return nil, fmt.Errorf("querying event metrics: %w", err)
+	}
+	for evRows.Next() {
+		var prod string
+		var total, delivered, pending, failed int
+		if scanErr := evRows.Scan(&prod, &total, &delivered, &pending, &failed); scanErr != nil {
+			evRows.Close()
+			return nil, scanErr
+		}
+		m := metrics[prod]
+		m.Product = prod
+		m.TotalEvents = total
+		m.DeliveredEvents = delivered
+		m.PendingEvents = pending
+		m.FailedEvents = failed
+		metrics[prod] = m
+	}
+	evRows.Close()
+	if err := evRows.Err(); err != nil {
+		return nil, err
+	}
+
+	failureQuery := `
+SELECT
+	COALESCE(NULLIF(product, ''), 'unmatched') AS prod,
+	COUNT(*) FILTER (WHERE status = 'RETRYING') AS active_retries,
+	COUNT(*) FILTER (WHERE status = 'FAILED') AS dead_letter
+FROM delivery_failures
+GROUP BY prod
+`
+	fRows, err := s.pool.Query(ctx, failureQuery)
+	if err != nil {
+		return nil, fmt.Errorf("querying failure metrics: %w", err)
+	}
+	for fRows.Next() {
+		var prod string
+		var activeRetries, deadLetter int
+		if scanErr := fRows.Scan(&prod, &activeRetries, &deadLetter); scanErr != nil {
+			fRows.Close()
+			return nil, scanErr
+		}
+		m := metrics[prod]
+		m.Product = prod
+		m.ActiveRetries = activeRetries
+		m.DeadLetterCount = deadLetter
+		metrics[prod] = m
+	}
+	fRows.Close()
+	if err := fRows.Err(); err != nil {
+		return nil, err
+	}
+
+	return metrics, nil
 }
 
 func (s *PostgresWebhookStore) Ping(ctx context.Context) error {
@@ -645,6 +1061,9 @@ func (s *InMemoryWebhookStore) SaveEvent(_ context.Context, event *WebhookEvent)
 	if event.Status == "" {
 		event.Status = WebhookStatusPending
 	}
+	if strings.TrimSpace(event.Product) == "" {
+		event.Product = RoutingModeUnmatched
+	}
 
 	stored := cloneWebhookEvent(event)
 	s.eventsByID[stored.ID] = stored
@@ -673,6 +1092,22 @@ func (s *InMemoryWebhookStore) UpdateStatus(_ context.Context, eventID string, s
 		return ErrKeyNotFound
 	}
 	ev.Status = status
+	ev.UpdatedAt = time.Now().UTC()
+	return nil
+}
+
+func (s *InMemoryWebhookStore) UpdateEventProduct(_ context.Context, eventID string, product string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ev, ok := s.eventsByID[eventID]
+	if !ok {
+		return ErrKeyNotFound
+	}
+	if strings.TrimSpace(product) == "" {
+		product = RoutingModeUnmatched
+	}
+	ev.Product = product
 	ev.UpdatedAt = time.Now().UTC()
 	return nil
 }
@@ -824,6 +1259,220 @@ func (s *InMemoryWebhookStore) HasPendingOrFailedDeliveries(_ context.Context, e
 		}
 	}
 	return hasRetrying, hasFailed, nil
+}
+
+func (s *InMemoryWebhookStore) ListEvents(_ context.Context, filter EventFilter) ([]WebhookEvent, int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	limit := filter.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	q := strings.ToLower(strings.TrimSpace(filter.Search))
+
+	var matched []WebhookEvent
+	for _, ev := range s.eventsByID {
+		prod := ev.Product
+		if prod == "" {
+			prod = RoutingModeUnmatched
+		}
+		if filter.Product != "" && !strings.EqualFold(prod, filter.Product) {
+			continue
+		}
+		if filter.Provider != "" && ev.Provider != filter.Provider {
+			continue
+		}
+		if filter.Status != "" && ev.Status != filter.Status {
+			continue
+		}
+		if q != "" {
+			if !strings.Contains(strings.ToLower(ev.PaymentReference), q) &&
+				!strings.Contains(strings.ToLower(ev.ProviderEventID), q) &&
+				!strings.Contains(strings.ToLower(ev.ID), q) {
+				continue
+			}
+		}
+		cloned := cloneWebhookEvent(ev)
+		if cloned.Product == "" {
+			cloned.Product = RoutingModeUnmatched
+		}
+		matched = append(matched, *cloned)
+	}
+
+	sort.Slice(matched, func(i, j int) bool {
+		if matched[i].CreatedAt.Equal(matched[j].CreatedAt) {
+			return matched[i].ID > matched[j].ID
+		}
+		return matched[i].CreatedAt.After(matched[j].CreatedAt)
+	})
+
+	total := len(matched)
+	if offset >= total {
+		return []WebhookEvent{}, total, nil
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return matched[offset:end], total, nil
+}
+
+func (s *InMemoryWebhookStore) ListAllDeliveryFailures(_ context.Context, filter FailureFilter) ([]DeliveryFailure, int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	limit := filter.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+
+	var matched []DeliveryFailure
+	for _, item := range s.failures {
+		if filter.Product != "" && !strings.EqualFold(item.Product, filter.Product) {
+			continue
+		}
+		if filter.Provider != "" && item.Provider != filter.Provider {
+			continue
+		}
+		if filter.Status != "" && item.Status != filter.Status {
+			continue
+		}
+		if filter.EventID != "" && item.EventID != filter.EventID {
+			continue
+		}
+		matched = append(matched, *cloneDeliveryFailure(item))
+	}
+
+	sort.Slice(matched, func(i, j int) bool {
+		if matched[i].UpdatedAt.Equal(matched[j].UpdatedAt) {
+			return matched[i].ID > matched[j].ID
+		}
+		return matched[i].UpdatedAt.After(matched[j].UpdatedAt)
+	})
+
+	total := len(matched)
+	if offset >= total {
+		return []DeliveryFailure{}, total, nil
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return matched[offset:end], total, nil
+}
+
+func (s *InMemoryWebhookStore) GetDeliveryFailure(_ context.Context, failureID string) (*DeliveryFailure, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	item, ok := s.failures[failureID]
+	if !ok {
+		return nil, ErrFailureNotFound
+	}
+	return cloneDeliveryFailure(item), nil
+}
+
+func (s *InMemoryWebhookStore) UpdateDeliveryFailureAttempt(_ context.Context, failure *DeliveryFailure) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	stored, ok := s.failures[failure.ID]
+	if !ok {
+		return ErrFailureNotFound
+	}
+	now := time.Now().UTC()
+	stored.RetryCount = failure.RetryCount
+	stored.MaxRetries = failure.MaxRetries
+	stored.StatusCode = failure.StatusCode
+	stored.ErrorMessage = failure.ErrorMessage
+	stored.Status = failure.Status
+	stored.NextRetryAt = failure.NextRetryAt
+	stored.UpdatedAt = now
+	failure.UpdatedAt = now
+	return nil
+}
+
+func (s *InMemoryWebhookStore) ResetFailuresForRetry(_ context.Context, product string, provider PSPProvider) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UTC()
+	count := 0
+	for _, item := range s.failures {
+		if item.Status != DeliveryStatusFailed && item.Status != DeliveryStatusRetrying {
+			continue
+		}
+		if item.TargetURL == "" {
+			continue
+		}
+		if product != "" && !strings.EqualFold(item.Product, product) {
+			continue
+		}
+		if provider != "" && item.Provider != provider {
+			continue
+		}
+		item.Status = DeliveryStatusRetrying
+		item.RetryCount = 0
+		if item.MaxRetries < 3 {
+			item.MaxRetries = 3
+		}
+		item.NextRetryAt = now
+		item.UpdatedAt = now
+		count++
+	}
+	return count, nil
+}
+
+func (s *InMemoryWebhookStore) GetProductMetrics(_ context.Context) (map[string]ProductMetrics, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	metrics := make(map[string]ProductMetrics)
+	for _, ev := range s.eventsByID {
+		prod := ev.Product
+		if prod == "" {
+			prod = RoutingModeUnmatched
+		}
+		m := metrics[prod]
+		m.Product = prod
+		m.TotalEvents++
+		switch ev.Status {
+		case WebhookStatusDelivered:
+			m.DeliveredEvents++
+		case WebhookStatusPending, WebhookStatusPublished:
+			m.PendingEvents++
+		case WebhookStatusFailed:
+			m.FailedEvents++
+		}
+		metrics[prod] = m
+	}
+
+	for _, f := range s.failures {
+		prod := f.Product
+		if prod == "" {
+			prod = RoutingModeUnmatched
+		}
+		m := metrics[prod]
+		m.Product = prod
+		switch f.Status {
+		case DeliveryStatusRetrying:
+			m.ActiveRetries++
+		case DeliveryStatusFailed:
+			m.DeadLetterCount++
+		}
+		metrics[prod] = m
+	}
+
+	return metrics, nil
 }
 
 func (s *InMemoryWebhookStore) Ping(_ context.Context) error {

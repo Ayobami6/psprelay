@@ -81,9 +81,10 @@ func run(ctx context.Context, cfg *internal.Config) error {
 	// Initialize Domain & Application Use Cases
 	domainService := internal.NewService(store)
 	healthCheckUseCase := internal.NewHealthCheckUseCase(domainService)
-	relayService := internal.NewRelayService(store, publisher, logger)
+	relayService := internal.NewRelayServiceWithConfig(store, publisher, gatewayCfg, logger)
 	receiverUseCase := internal.NewReceiverUseCase(relayService, paystackSvc, flutterwaveSvc, monnifySvc)
 	dispatcherUseCase := internal.NewDispatcherUseCase(gatewayCfg, httpDispatcher, store, publisher, cfg.RetryBaseBackoff, logger)
+	managementUseCase := internal.NewManagementUseCase(store, gatewayCfg, httpDispatcher, dispatcherUseCase, cfg.RetryBaseBackoff, logger)
 
 	// Initialize Background Workers (Outbox, Retry, Kafka Consumer)
 	outboxWorker := internal.NewOutboxWorker(store, publisher, cfg.OutboxPollInterval, 5*time.Second, logger)
@@ -111,6 +112,7 @@ func run(ctx context.Context, cfg *internal.Config) error {
 	// Initialize HTTP Controllers
 	healthCtrl := internal.NewHealthController(healthCheckUseCase)
 	webhookCtrl := internal.NewPSPWebhookController(receiverUseCase)
+	adminCtrl := internal.NewAdminController(managementUseCase)
 
 	if cfg.Environment == internal.EnvironmentProduction {
 		gin.SetMode(gin.ReleaseMode)
@@ -132,6 +134,13 @@ func run(ctx context.Context, cfg *internal.Config) error {
 	v1 := router.Group("/v1")
 	healthCtrl.RegisterRoutes(v1)
 	webhookCtrl.RegisterRoutes(v1)
+
+	adminAuth := internal.AdminAuthMiddleware(cfg.AdminUsername, cfg.AdminPassword)
+	v1Admin := v1.Group("/admin", adminAuth)
+	adminCtrl.RegisterAPIRoutes(v1Admin)
+
+	uiGroup := router.Group("/admin", adminAuth)
+	adminCtrl.RegisterUIRoutes(uiGroup)
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
