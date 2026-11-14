@@ -132,6 +132,8 @@ type WebhookStore interface {
 	UpdateDeliveryFailureAttempt(ctx context.Context, failure *DeliveryFailure) error
 	ResetFailuresForRetry(ctx context.Context, product string, provider PSPProvider) (int, error)
 	GetProductMetrics(ctx context.Context) (map[string]ProductMetrics, error)
+	ResolveDeliveryFailuresForEvent(ctx context.Context, eventID string, reason string) error
+	BackfillEventProducts(ctx context.Context, matchFn func(ref string) (string, bool)) (int, error)
 	Ping(ctx context.Context) error
 	Close()
 }
@@ -193,6 +195,11 @@ CREATE TABLE IF NOT EXISTS webhook_events (
 );
 
 ALTER TABLE webhook_events ADD COLUMN IF NOT EXISTS product TEXT NOT NULL DEFAULT 'unmatched';
+
+UPDATE webhook_events w
+SET product = df.product
+FROM delivery_failures df
+WHERE w.id = df.event_id AND w.product = 'unmatched' AND df.product <> 'unmatched';
 
 CREATE INDEX IF NOT EXISTS idx_webhook_events_outbox
 	ON webhook_events (created_at ASC)
@@ -883,7 +890,7 @@ func (s *PostgresWebhookStore) UpdateDeliveryFailureAttempt(ctx context.Context,
 	query := `
 UPDATE delivery_failures
 SET retry_count = $1, max_retries = $2, status_code = $3, error_message = $4, status = $5, next_retry_at = $6, updated_at = $7
-WHERE id = $8
+WHERE id = $8 AND (status <> 'RESOLVED' OR $5 = 'RESOLVED')
 `
 	tag, err := s.pool.Exec(
 		ctx,
@@ -901,9 +908,63 @@ WHERE id = $8
 		return err
 	}
 	if tag.RowsAffected() == 0 {
+		current, getErr := s.GetDeliveryFailure(ctx, failure.ID)
+		if getErr != nil {
+			return ErrFailureNotFound
+		}
+		if current.Status == DeliveryStatusResolved {
+			*failure = *current
+			return nil
+		}
 		return ErrFailureNotFound
 	}
 	return nil
+}
+
+func (s *PostgresWebhookStore) ResolveDeliveryFailuresForEvent(ctx context.Context, eventID string, reason string) error {
+	now := time.Now().UTC()
+	query := `
+UPDATE delivery_failures
+SET status = 'RESOLVED', error_message = $1, updated_at = $2
+WHERE event_id = $3 AND status <> 'RESOLVED'
+`
+	_, err := s.pool.Exec(ctx, query, reason, now, eventID)
+	return err
+}
+
+func (s *PostgresWebhookStore) BackfillEventProducts(ctx context.Context, matchFn func(ref string) (string, bool)) (int, error) {
+	query := `SELECT id, payment_reference FROM webhook_events WHERE product = 'unmatched'`
+	rows, err := s.pool.Query(ctx, query)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	type matchItem struct {
+		id      string
+		product string
+	}
+	var matches []matchItem
+	for rows.Next() {
+		var id, ref string
+		if err := rows.Scan(&id, &ref); err != nil {
+			return 0, err
+		}
+		if prod, ok := matchFn(ref); ok && prod != RoutingModeUnmatched {
+			matches = append(matches, matchItem{id: id, product: prod})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	updatedCount := 0
+	for _, m := range matches {
+		if err := s.UpdateEventProduct(ctx, m.id, m.product); err == nil {
+			updatedCount++
+		}
+	}
+	return updatedCount, nil
 }
 
 func (s *PostgresWebhookStore) ResetFailuresForRetry(ctx context.Context, product string, provider PSPProvider) (int, error) {
@@ -1389,6 +1450,10 @@ func (s *InMemoryWebhookStore) UpdateDeliveryFailureAttempt(_ context.Context, f
 	if !ok {
 		return ErrFailureNotFound
 	}
+	if stored.Status == DeliveryStatusResolved && failure.Status != DeliveryStatusResolved {
+		*failure = *cloneDeliveryFailure(stored)
+		return nil
+	}
 	now := time.Now().UTC()
 	stored.RetryCount = failure.RetryCount
 	stored.MaxRetries = failure.MaxRetries
@@ -1399,6 +1464,39 @@ func (s *InMemoryWebhookStore) UpdateDeliveryFailureAttempt(_ context.Context, f
 	stored.UpdatedAt = now
 	failure.UpdatedAt = now
 	return nil
+}
+
+func (s *InMemoryWebhookStore) ResolveDeliveryFailuresForEvent(_ context.Context, eventID string, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UTC()
+	for _, f := range s.failures {
+		if f.EventID == eventID && f.Status != DeliveryStatusResolved {
+			f.Status = DeliveryStatusResolved
+			f.ErrorMessage = reason
+			f.UpdatedAt = now
+		}
+	}
+	return nil
+}
+
+func (s *InMemoryWebhookStore) BackfillEventProducts(_ context.Context, matchFn func(ref string) (string, bool)) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	updatedCount := 0
+	now := time.Now().UTC()
+	for _, ev := range s.eventsByID {
+		if ev.Product == "" || ev.Product == RoutingModeUnmatched {
+			if prod, ok := matchFn(ev.PaymentReference); ok && prod != RoutingModeUnmatched {
+				ev.Product = prod
+				ev.UpdatedAt = now
+				updatedCount++
+			}
+		}
+	}
+	return updatedCount, nil
 }
 
 func (s *InMemoryWebhookStore) ResetFailuresForRetry(_ context.Context, product string, provider PSPProvider) (int, error) {

@@ -358,6 +358,7 @@
             hx-get="/admin/partials/{{.ActiveTab}}"
             hx-target="#workspace-panel"
             hx-trigger="change, submit">
+        <input type="hidden" name="offset" value="0" />
         <select id="filter-product" name="product">
           <option value="">All Products</option>
           {{range .Overview.Products}}
@@ -453,6 +454,29 @@
     </tbody>
   </table>
 </div>
+{{if gt .Total 0}}
+<div class="pagination" style="display:flex; justify-content:space-between; align-items:center; margin-top:1rem; font-size:0.85rem;">
+  <span class="mono" style="color:var(--muted);">Showing page {{.Page}} of {{.TotalPages}} ({{.Total}} total events)</span>
+  <div style="display:flex; gap:0.5rem;">
+    {{if .HasPrev}}
+    <button class="btn btn-outline"
+            hx-get="/admin/partials/events?offset={{.PrevOffset}}&limit={{.Limit}}"
+            hx-include="#filter-form"
+            hx-target="#workspace-panel">
+      &larr; Previous
+    </button>
+    {{end}}
+    {{if .HasNext}}
+    <button class="btn btn-outline"
+            hx-get="/admin/partials/events?offset={{.NextOffset}}&limit={{.Limit}}"
+            hx-include="#filter-form"
+            hx-target="#workspace-panel">
+      Next &rarr;
+    </button>
+    {{end}}
+  </div>
+</div>
+{{end}}
 {{end}}
 
 {{define "failures_table"}}
@@ -494,6 +518,29 @@
     </tbody>
   </table>
 </div>
+{{if gt .Total 0}}
+<div class="pagination" style="display:flex; justify-content:space-between; align-items:center; margin-top:1rem; font-size:0.85rem;">
+  <span class="mono" style="color:var(--muted);">Showing page {{.Page}} of {{.TotalPages}} ({{.Total}} total failures)</span>
+  <div style="display:flex; gap:0.5rem;">
+    {{if .HasPrev}}
+    <button class="btn btn-outline"
+            hx-get="/admin/partials/failures?offset={{.PrevOffset}}&limit={{.Limit}}"
+            hx-include="#filter-form"
+            hx-target="#workspace-panel">
+      &larr; Previous
+    </button>
+    {{end}}
+    {{if .HasNext}}
+    <button class="btn btn-outline"
+            hx-get="/admin/partials/failures?offset={{.NextOffset}}&limit={{.Limit}}"
+            hx-include="#filter-form"
+            hx-target="#workspace-panel">
+      Next &rarr;
+    </button>
+    {{end}}
+  </div>
+</div>
+{{end}}
 {{end}}
 
 {{define "failure_row"}}

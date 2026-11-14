@@ -62,11 +62,17 @@ type dashboardViewData struct {
 }
 
 type failuresPartialData struct {
-	Items  []DeliveryFailure
-	Total  int
-	Limit  int
-	Offset int
-	Notice string
+	Items      []DeliveryFailure
+	Total      int
+	Limit      int
+	Offset     int
+	HasPrev    bool
+	HasNext    bool
+	PrevOffset int
+	NextOffset int
+	Page       int
+	TotalPages int
+	Notice     string
 }
 
 type eventDetailPartialData struct {
@@ -104,10 +110,16 @@ func (c *AdminController) RenderDashboard(g *gin.Context) {
 			return
 		}
 		data.FailuresPage = &failuresPartialData{
-			Items:  page.Items,
-			Total:  page.Total,
-			Limit:  page.Limit,
-			Offset: page.Offset,
+			Items:      page.Items,
+			Total:      page.Total,
+			Limit:      page.Limit,
+			Offset:     page.Offset,
+			HasPrev:    page.HasPrev,
+			HasNext:    page.HasNext,
+			PrevOffset: page.PrevOffset,
+			NextOffset: page.NextOffset,
+			Page:       page.Page,
+			TotalPages: page.TotalPages,
 		}
 	} else {
 		page, eErr := c.useCase.ListEvents(ctx, parseEventFilter(g))
@@ -153,10 +165,16 @@ func (c *AdminController) RenderFailuresPartial(g *gin.Context) {
 		return
 	}
 	c.renderTemplate(g, http.StatusOK, "failures_table", failuresPartialData{
-		Items:  page.Items,
-		Total:  page.Total,
-		Limit:  page.Limit,
-		Offset: page.Offset,
+		Items:      page.Items,
+		Total:      page.Total,
+		Limit:      page.Limit,
+		Offset:     page.Offset,
+		HasPrev:    page.HasPrev,
+		HasNext:    page.HasNext,
+		PrevOffset: page.PrevOffset,
+		NextOffset: page.NextOffset,
+		Page:       page.Page,
+		TotalPages: page.TotalPages,
 	})
 }
 
@@ -187,11 +205,17 @@ func (c *AdminController) HandleUIBulkRetry(g *gin.Context) {
 	}
 
 	c.renderTemplate(g, http.StatusOK, "failures_table", failuresPartialData{
-		Items:  page.Items,
-		Total:  page.Total,
-		Limit:  page.Limit,
-		Offset: page.Offset,
-		Notice: fmt.Sprintf("Queued %d delivery failure(s) for immediate background retry.", count),
+		Items:      page.Items,
+		Total:      page.Total,
+		Limit:      page.Limit,
+		Offset:     page.Offset,
+		HasPrev:    page.HasPrev,
+		HasNext:    page.HasNext,
+		PrevOffset: page.PrevOffset,
+		NextOffset: page.NextOffset,
+		Page:       page.Page,
+		TotalPages: page.TotalPages,
+		Notice:     fmt.Sprintf("Queued %d delivery failure(s) for immediate background retry.", count),
 	})
 }
 
@@ -292,7 +316,18 @@ type bulkRetryRequest struct {
 // BulkRetryFailuresAPI resets matching delivery failures to RETRYING for asynchronous worker execution.
 func (c *AdminController) BulkRetryFailuresAPI(g *gin.Context) {
 	var req bulkRetryRequest
-	_ = g.ShouldBind(&req)
+	if g.ContentType() == gin.MIMEJSON {
+		if err := g.ShouldBindJSON(&req); err != nil {
+			pd := NewProblemDetails(http.StatusBadRequest, "invalid bulk retry request: "+err.Error())
+			pd.Respond(g)
+			return
+		}
+	} else if err := g.ShouldBind(&req); err != nil {
+		pd := NewProblemDetails(http.StatusBadRequest, "invalid bulk retry request: "+err.Error())
+		pd.Respond(g)
+		return
+	}
+
 	if req.Product == "" {
 		req.Product = g.Query("product")
 	}
@@ -325,10 +360,20 @@ func (c *AdminController) renderTemplate(g *gin.Context, status int, name string
 	g.Data(status, "text/html; charset=utf-8", buf.Bytes())
 }
 
+func paramFirst(g *gin.Context, key, fallback string) string {
+	if val := strings.TrimSpace(g.PostForm(key)); val != "" {
+		return val
+	}
+	if val := strings.TrimSpace(g.Query(key)); val != "" {
+		return val
+	}
+	return fallback
+}
+
 func parseEventFilter(g *gin.Context) EventFilter {
-	limit, _ := strconv.Atoi(g.DefaultQuery("limit", "25"))
-	offset, _ := strconv.Atoi(g.DefaultQuery("offset", "0"))
-	status := strings.ToUpper(strings.TrimSpace(g.Query("status")))
+	limit, _ := strconv.Atoi(paramFirst(g, "limit", "25"))
+	offset, _ := strconv.Atoi(paramFirst(g, "offset", "0"))
+	status := strings.ToUpper(paramFirst(g, "status", ""))
 	if status != string(WebhookStatusPending) &&
 		status != string(WebhookStatusPublished) &&
 		status != string(WebhookStatusDelivered) &&
@@ -336,29 +381,29 @@ func parseEventFilter(g *gin.Context) EventFilter {
 		status = ""
 	}
 	return EventFilter{
-		Product:  strings.TrimSpace(g.Query("product")),
-		Provider: PSPProvider(strings.ToLower(strings.TrimSpace(g.Query("provider")))),
+		Product:  paramFirst(g, "product", ""),
+		Provider: PSPProvider(strings.ToLower(paramFirst(g, "provider", ""))),
 		Status:   WebhookStatus(status),
-		Search:   strings.TrimSpace(g.Query("q")),
+		Search:   paramFirst(g, "q", ""),
 		Limit:    limit,
 		Offset:   offset,
 	}
 }
 
 func parseFailureFilter(g *gin.Context) FailureFilter {
-	limit, _ := strconv.Atoi(g.DefaultQuery("limit", "25"))
-	offset, _ := strconv.Atoi(g.DefaultQuery("offset", "0"))
-	status := strings.ToUpper(strings.TrimSpace(g.Query("status")))
+	limit, _ := strconv.Atoi(paramFirst(g, "limit", "25"))
+	offset, _ := strconv.Atoi(paramFirst(g, "offset", "0"))
+	status := strings.ToUpper(paramFirst(g, "status", ""))
 	if status != string(DeliveryStatusRetrying) &&
 		status != string(DeliveryStatusFailed) &&
 		status != string(DeliveryStatusResolved) {
 		status = ""
 	}
 	return FailureFilter{
-		Product:  strings.TrimSpace(g.Query("product")),
-		Provider: PSPProvider(strings.ToLower(strings.TrimSpace(g.Query("provider")))),
+		Product:  paramFirst(g, "product", ""),
+		Provider: PSPProvider(strings.ToLower(paramFirst(g, "provider", ""))),
 		Status:   DeliveryFailureStatus(status),
-		EventID:  strings.TrimSpace(g.Query("event_id")),
+		EventID:  paramFirst(g, "event_id", ""),
 		Limit:    limit,
 		Offset:   offset,
 	}

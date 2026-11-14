@@ -26,18 +26,30 @@ type DashboardOverview struct {
 
 // PaginatedEvents wraps a page of WebhookEvent records with total count metadata.
 type PaginatedEvents struct {
-	Items  []WebhookEvent `json:"items"`
-	Total  int            `json:"total"`
-	Limit  int            `json:"limit"`
-	Offset int            `json:"offset"`
+	Items      []WebhookEvent `json:"items"`
+	Total      int            `json:"total"`
+	Limit      int            `json:"limit"`
+	Offset     int            `json:"offset"`
+	HasPrev    bool           `json:"has_prev"`
+	HasNext    bool           `json:"has_next"`
+	PrevOffset int            `json:"prev_offset"`
+	NextOffset int            `json:"next_offset"`
+	Page       int            `json:"page"`
+	TotalPages int            `json:"total_pages"`
 }
 
 // PaginatedFailures wraps a page of DeliveryFailure records with total count metadata.
 type PaginatedFailures struct {
-	Items  []DeliveryFailure `json:"items"`
-	Total  int               `json:"total"`
-	Limit  int               `json:"limit"`
-	Offset int               `json:"offset"`
+	Items      []DeliveryFailure `json:"items"`
+	Total      int               `json:"total"`
+	Limit      int               `json:"limit"`
+	Offset     int               `json:"offset"`
+	HasPrev    bool              `json:"has_prev"`
+	HasNext    bool              `json:"has_next"`
+	PrevOffset int               `json:"prev_offset"`
+	NextOffset int               `json:"next_offset"`
+	Page       int               `json:"page"`
+	TotalPages int               `json:"total_pages"`
 }
 
 // EventDetail holds a single WebhookEvent, its formatted JSON payload, and all associated DeliveryFailure attempts.
@@ -63,6 +75,7 @@ type managementUseCaseImpl struct {
 	gatewayCfg       *GatewayConfig
 	dispatcher       UpstreamDispatcher
 	dispatcherUC     DispatcherUseCase
+	publisher        EventPublisher
 	retryBaseBackoff time.Duration
 	logger           *slog.Logger
 }
@@ -73,6 +86,7 @@ func NewManagementUseCase(
 	gatewayCfg *GatewayConfig,
 	dispatcher UpstreamDispatcher,
 	dispatcherUC DispatcherUseCase,
+	publisher EventPublisher,
 	retryBaseBackoff time.Duration,
 	logger *slog.Logger,
 ) ManagementUseCase {
@@ -87,6 +101,7 @@ func NewManagementUseCase(
 		gatewayCfg:       gatewayCfg,
 		dispatcher:       dispatcher,
 		dispatcherUC:     dispatcherUC,
+		publisher:        publisher,
 		retryBaseBackoff: retryBaseBackoff,
 		logger:           logger,
 	}
@@ -170,11 +185,30 @@ func (u *managementUseCaseImpl) ListEvents(ctx context.Context, filter EventFilt
 		items = []WebhookEvent{}
 	}
 
+	page := (filter.Offset / filter.Limit) + 1
+	totalPages := (total + filter.Limit - 1) / filter.Limit
+	if totalPages == 0 {
+		totalPages = 1
+	}
+	hasPrev := filter.Offset > 0
+	hasNext := filter.Offset+filter.Limit < total
+	prevOffset := filter.Offset - filter.Limit
+	if prevOffset < 0 {
+		prevOffset = 0
+	}
+	nextOffset := filter.Offset + filter.Limit
+
 	return &PaginatedEvents{
-		Items:  items,
-		Total:  total,
-		Limit:  filter.Limit,
-		Offset: filter.Offset,
+		Items:      items,
+		Total:      total,
+		Limit:      filter.Limit,
+		Offset:     filter.Offset,
+		HasPrev:    hasPrev,
+		HasNext:    hasNext,
+		PrevOffset: prevOffset,
+		NextOffset: nextOffset,
+		Page:       page,
+		TotalPages: totalPages,
 	}, nil
 }
 
@@ -223,11 +257,30 @@ func (u *managementUseCaseImpl) ListFailures(ctx context.Context, filter Failure
 		items = []DeliveryFailure{}
 	}
 
+	page := (filter.Offset / filter.Limit) + 1
+	totalPages := (total + filter.Limit - 1) / filter.Limit
+	if totalPages == 0 {
+		totalPages = 1
+	}
+	hasPrev := filter.Offset > 0
+	hasNext := filter.Offset+filter.Limit < total
+	prevOffset := filter.Offset - filter.Limit
+	if prevOffset < 0 {
+		prevOffset = 0
+	}
+	nextOffset := filter.Offset + filter.Limit
+
 	return &PaginatedFailures{
-		Items:  items,
-		Total:  total,
-		Limit:  filter.Limit,
-		Offset: filter.Offset,
+		Items:      items,
+		Total:      total,
+		Limit:      filter.Limit,
+		Offset:     filter.Offset,
+		HasPrev:    hasPrev,
+		HasNext:    hasNext,
+		PrevOffset: prevOffset,
+		NextOffset: nextOffset,
+		Page:       page,
+		TotalPages: totalPages,
 	}, nil
 }
 
@@ -297,6 +350,23 @@ func (u *managementUseCaseImpl) RetryFailureNow(ctx context.Context, failureID s
 		}
 		if failure.RetryCount >= failure.MaxRetries {
 			failure.Status = DeliveryStatusFailed
+			if u.publisher != nil {
+				_ = u.publisher.PublishDLQ(ctx, DLQMessage{
+					FailureID:    failure.ID,
+					EventID:      failure.EventID,
+					Provider:     failure.Provider,
+					Product:      failure.Product,
+					EndpointName: failure.EndpointName,
+					TargetURL:    failure.TargetURL,
+					RoutingMode:  failure.RoutingMode,
+					Headers:      failure.Headers,
+					Payload:      failure.Payload,
+					StatusCode:   failure.StatusCode,
+					ErrorMessage: failure.ErrorMessage,
+					RetryCount:   failure.RetryCount,
+					FailedAt:     time.Now().UTC(),
+				})
+			}
 		} else {
 			failure.Status = DeliveryStatusRetrying
 			failure.NextRetryAt = time.Now().UTC().Add(computeBackoffWithJitter(u.retryBaseBackoff, failure.RetryCount))
@@ -329,6 +399,11 @@ func (u *managementUseCaseImpl) ReplayEventNow(ctx context.Context, eventID stri
 		if dispErr := u.dispatcherUC.Execute(ctx, *ev); dispErr != nil {
 			return nil, fmt.Errorf("replaying webhook event %q: %w", trimmedID, dispErr)
 		}
+	}
+
+	hasRetrying, hasFailed, checkErr := u.store.HasPendingOrFailedDeliveries(ctx, trimmedID)
+	if checkErr == nil && !hasRetrying && !hasFailed {
+		_ = u.store.ResolveDeliveryFailuresForEvent(ctx, trimmedID, "resolved via event replay")
 	}
 
 	updated, getErr := u.store.GetEvent(ctx, trimmedID)

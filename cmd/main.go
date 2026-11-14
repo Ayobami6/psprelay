@@ -84,7 +84,19 @@ func run(ctx context.Context, cfg *internal.Config) error {
 	relayService := internal.NewRelayServiceWithConfig(store, publisher, gatewayCfg, logger)
 	receiverUseCase := internal.NewReceiverUseCase(relayService, paystackSvc, flutterwaveSvc, monnifySvc)
 	dispatcherUseCase := internal.NewDispatcherUseCase(gatewayCfg, httpDispatcher, store, publisher, cfg.RetryBaseBackoff, logger)
-	managementUseCase := internal.NewManagementUseCase(store, gatewayCfg, httpDispatcher, dispatcherUseCase, cfg.RetryBaseBackoff, logger)
+	managementUseCase := internal.NewManagementUseCase(store, gatewayCfg, httpDispatcher, dispatcherUseCase, publisher, cfg.RetryBaseBackoff, logger)
+
+	// Backfill historical event product attributions if unassigned
+	if len(gatewayCfg.Products) > 0 {
+		if backfilled, bfErr := store.BackfillEventProducts(rootCtx, func(ref string) (string, bool) {
+			prod, _, matched := gatewayCfg.MatchProductByReference(ref)
+			return prod, matched
+		}); bfErr != nil {
+			logger.Warn("Failed to backfill historical event product attributions", "error", bfErr)
+		} else if backfilled > 0 {
+			logger.Info("Backfilled historical event product attributions", "count", backfilled)
+		}
+	}
 
 	// Initialize Background Workers (Outbox, Retry, Kafka Consumer)
 	outboxWorker := internal.NewOutboxWorker(store, publisher, cfg.OutboxPollInterval, 5*time.Second, logger)
@@ -135,7 +147,7 @@ func run(ctx context.Context, cfg *internal.Config) error {
 	healthCtrl.RegisterRoutes(v1)
 	webhookCtrl.RegisterRoutes(v1)
 
-	adminAuth := internal.AdminAuthMiddleware(cfg.AdminUsername, cfg.AdminPassword)
+	adminAuth := internal.AdminAuthMiddleware(cfg.AdminUsername, cfg.AdminPassword, cfg.Environment)
 	v1Admin := v1.Group("/admin", adminAuth)
 	adminCtrl.RegisterAPIRoutes(v1Admin)
 

@@ -19,9 +19,9 @@ import (
 )
 
 func TestAdminAuthMiddleware(t *testing.T) {
-	t.Run("allows requests through when username and password are empty", func(t *testing.T) {
+	t.Run("allows requests through in development when username and password are empty", func(t *testing.T) {
 		router := gin.New()
-		router.Use(internal.AdminAuthMiddleware("", ""))
+		router.Use(internal.AdminAuthMiddleware("", "", internal.EnvironmentDevelopment))
 		router.GET("/admin", func(c *gin.Context) {
 			c.Status(http.StatusOK)
 		})
@@ -31,13 +31,47 @@ func TestAdminAuthMiddleware(t *testing.T) {
 		router.ServeHTTP(w, req)
 
 		if w.Code != http.StatusOK {
-			t.Fatalf("expected 200 OK when auth is disabled, got %d", w.Code)
+			t.Fatalf("expected 200 OK when auth is disabled in dev, got %d", w.Code)
+		}
+	})
+
+	t.Run("blocks unauthenticated admin access in production when credentials are unset", func(t *testing.T) {
+		router := gin.New()
+		router.Use(internal.AdminAuthMiddleware("", "", internal.EnvironmentProduction))
+		router.GET("/admin", func(c *gin.Context) {
+			c.Status(http.StatusOK)
+		})
+
+		req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 Unauthorized in production without credentials, got %d", w.Code)
+		}
+	})
+
+	t.Run("rejects cross-site mutating requests", func(t *testing.T) {
+		router := gin.New()
+		router.Use(internal.AdminAuthMiddleware("admin", "secret123", internal.EnvironmentDevelopment))
+		router.POST("/admin/failures/bulk-retry", func(c *gin.Context) {
+			c.Status(http.StatusOK)
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/admin/failures/bulk-retry", nil)
+		req.Header.Set("Sec-Fetch-Site", "cross-site")
+		req.SetBasicAuth("admin", "secret123")
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("expected 403 Forbidden for cross-site POST, got %d", w.Code)
 		}
 	})
 
 	t.Run("enforces Basic Auth when configured", func(t *testing.T) {
 		router := gin.New()
-		router.Use(internal.AdminAuthMiddleware("admin", "secret123"))
+		router.Use(internal.AdminAuthMiddleware("admin", "secret123", internal.EnvironmentDevelopment))
 		router.GET("/admin", func(c *gin.Context) {
 			c.Status(http.StatusOK)
 		})
@@ -219,6 +253,46 @@ func TestInMemoryStore_ManagementMethods(t *testing.T) {
 	if afterReset.Status != internal.DeliveryStatusRetrying || afterReset.RetryCount != 0 {
 		t.Fatalf("expected RETRYING and RetryCount=0 after reset, got %+v", afterReset)
 	}
+
+	// ResolveDeliveryFailuresForEvent
+	if err := store.ResolveDeliveryFailuresForEvent(ctx, ev2.ID, "resolved via replay"); err != nil {
+		t.Fatalf("ResolveDeliveryFailuresForEvent failed: %v", err)
+	}
+	resF1, _ := store.GetDeliveryFailure(ctx, "fail_1")
+	if resF1.Status != internal.DeliveryStatusResolved {
+		t.Fatalf("expected fail_1 to be RESOLVED, got %s", resF1.Status)
+	}
+
+	// Concurrent update protection (RESOLVED status cannot be overwritten by failure attempt)
+	attemptFail := &internal.DeliveryFailure{ID: "fail_1", Status: internal.DeliveryStatusFailed}
+	if err := store.UpdateDeliveryFailureAttempt(ctx, attemptFail); err != nil {
+		t.Fatalf("unexpected error updating already-resolved failure: %v", err)
+	}
+	if attemptFail.Status != internal.DeliveryStatusResolved {
+		t.Fatalf("expected attemptFail to be preserved as RESOLVED, got %s", attemptFail.Status)
+	}
+
+	// BackfillEventProducts
+	_, _, _ = store.SaveEvent(ctx, &internal.WebhookEvent{
+		ID:               "ev_unm_bf",
+		Provider:         internal.Paystack,
+		ProviderEventID:  "ps_bf_1",
+		PaymentReference: "MN_bf_100",
+		Product:          internal.RoutingModeUnmatched,
+	})
+	bfCount, err := store.BackfillEventProducts(ctx, func(ref string) (string, bool) {
+		if strings.HasPrefix(ref, "MN_") {
+			return "mailnow", true
+		}
+		return "", false
+	})
+	if err != nil || bfCount != 1 {
+		t.Fatalf("expected 1 event backfilled, got %d err=%v", bfCount, err)
+	}
+	bfEv, _ := store.GetEvent(ctx, "ev_unm_bf")
+	if bfEv.Product != "mailnow" {
+		t.Fatalf("expected ev_unm_bf product to be mailnow, got %s", bfEv.Product)
+	}
 }
 
 func TestPostgresStore_ManagementMethods(t *testing.T) {
@@ -279,6 +353,36 @@ func TestPostgresStore_ManagementMethods(t *testing.T) {
 		count, err := store.ResetFailuresForRetry(ctx, "mailnow", internal.Paystack)
 		if err != nil || count != 1 {
 			t.Fatalf("ResetFailuresForRetry failed: count=%d err=%v", count, err)
+		}
+
+		// ResolveDeliveryFailuresForEvent
+		pool.execFn = func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
+			return pgconn.NewCommandTag("UPDATE 2"), nil
+		}
+		if err := store.ResolveDeliveryFailuresForEvent(ctx, "ev_1", "resolved via replay"); err != nil {
+			t.Fatalf("ResolveDeliveryFailuresForEvent failed: %v", err)
+		}
+
+		// BackfillEventProducts
+		bfRows := &mockPGRows{
+			data: [][]any{
+				{"ev_unm", "MN_test_1"},
+			},
+		}
+		pool.queryFn = func(_ context.Context, _ string, _ ...any) (pgx.Rows, error) {
+			return bfRows, nil
+		}
+		pool.execFn = func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
+			return pgconn.NewCommandTag("UPDATE 1"), nil
+		}
+		bfCount, err := store.BackfillEventProducts(ctx, func(ref string) (string, bool) {
+			if strings.HasPrefix(ref, "MN_") {
+				return "mailnow", true
+			}
+			return "", false
+		})
+		if err != nil || bfCount != 1 {
+			t.Fatalf("BackfillEventProducts failed: count=%d err=%v", bfCount, err)
 		}
 
 		// Zero rows affected -> ErrFailureNotFound
@@ -371,7 +475,7 @@ func TestManagementUseCase_And_AdminController(t *testing.T) {
 
 	relaySvc := internal.NewRelayServiceWithConfig(store, pub, gatewayCfg, silentLogger())
 	dispUC := internal.NewDispatcherUseCase(gatewayCfg, httpDisp, store, pub, 10*time.Millisecond, silentLogger())
-	mgmtUC := internal.NewManagementUseCase(store, gatewayCfg, httpDisp, dispUC, 10*time.Millisecond, silentLogger())
+	mgmtUC := internal.NewManagementUseCase(store, gatewayCfg, httpDisp, dispUC, pub, 10*time.Millisecond, silentLogger())
 
 	// 1. Ingest a matched webhook via RelayServiceWithConfig
 	ev1, err := relaySvc.Ingest(ctx, &internal.NormalizedWebhook{
@@ -478,20 +582,27 @@ func TestManagementUseCase_And_AdminController(t *testing.T) {
 			t.Fatalf("expected RESOLVED on unmatched route re-evaluation, code=%d body=%s", wUnm.Code, wUnm.Body.String())
 		}
 
-		// Bulk Retry
-		reqBulk := httptest.NewRequest(http.MethodPost, "/admin/failures/bulk-retry?product=mailnow", nil)
+		// Bulk Retry via POST form body
+		reqBulk := httptest.NewRequest(http.MethodPost, "/admin/failures/bulk-retry", strings.NewReader("product=mailnow&provider=paystack"))
+		reqBulk.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		wBulk := httptest.NewRecorder()
 		router.ServeHTTP(wBulk, reqBulk)
 		if wBulk.Code != http.StatusOK || !strings.Contains(wBulk.Body.String(), "Queued") {
 			t.Fatalf("expected bulk retry banner, code=%d body=%s", wBulk.Code, wBulk.Body.String())
 		}
 
-		// Replay Event
+		// Replay Event (and verify failures resolved)
 		reqReplay := httptest.NewRequest(http.MethodPost, "/admin/events/"+ev1.ID+"/replay", nil)
 		wReplay := httptest.NewRecorder()
 		router.ServeHTTP(wReplay, reqReplay)
 		if wReplay.Code != http.StatusOK || !strings.Contains(wReplay.Body.String(), "replayed") {
 			t.Fatalf("expected replay banner, code=%d body=%s", wReplay.Code, wReplay.Body.String())
+		}
+		fls, _ := store.ListDeliveryFailures(ctx, ev1.ID)
+		for _, f := range fls {
+			if f.Status != internal.DeliveryStatusResolved {
+				t.Fatalf("expected failure for replayed event to be resolved, got %s", f.Status)
+			}
 		}
 	})
 
@@ -555,6 +666,16 @@ func TestManagementUseCase_And_AdminController(t *testing.T) {
 			t.Fatalf("POST /v1/admin/failures/bulk-retry returned %d", wBulk.Code)
 		}
 
+		// Invalid JSON body on BulkRetry API -> 400 Bad Request
+		badJSON := []byte(`{"product": 123}`)
+		reqBad := httptest.NewRequest(http.MethodPost, "/v1/admin/failures/bulk-retry", bytes.NewReader(badJSON))
+		reqBad.Header.Set("Content-Type", "application/json")
+		wBad := httptest.NewRecorder()
+		router.ServeHTTP(wBad, reqBad)
+		if wBad.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for invalid JSON body on bulk-retry, got %d", wBad.Code)
+		}
+
 		// 404 Not Found branches
 		for _, notFoundReq := range []*http.Request{
 			httptest.NewRequest(http.MethodGet, "/v1/admin/events/nonexistent", nil),
@@ -570,7 +691,7 @@ func TestManagementUseCase_And_AdminController(t *testing.T) {
 	})
 
 	t.Run("ManagementUseCase edge cases: defaults, still-unmatched retry, retry exhaustion, and formatJSONPretty", func(t *testing.T) {
-		mgmtDefault := internal.NewManagementUseCase(store, gatewayCfg, httpDisp, dispUC, 0, nil)
+		mgmtDefault := internal.NewManagementUseCase(store, gatewayCfg, httpDisp, dispUC, pub, 0, nil)
 
 		// Empty ID checks
 		if _, err := mgmtDefault.GetEventDetail(ctx, "  "); !errors.Is(err, internal.ErrEventNotFound) {
@@ -653,6 +774,9 @@ func TestManagementUseCase_And_AdminController(t *testing.T) {
 		retExh, err := mgmtDefault.RetryFailureNow(ctx, fExhaust.ID)
 		if err != nil || retExh.Status != internal.DeliveryStatusFailed {
 			t.Fatalf("expected exhausted failure status=FAILED, got %+v err=%v", retExh, err)
+		}
+		if len(pub.dlqMsgs) == 0 || pub.dlqMsgs[len(pub.dlqMsgs)-1].FailureID != fExhaust.ID {
+			t.Fatalf("expected DLQ message published for manually exhausted failure, got %d msgs", len(pub.dlqMsgs))
 		}
 		httpDisp.sendErr = nil
 	})

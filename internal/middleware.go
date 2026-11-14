@@ -133,10 +133,25 @@ func CorsMiddleware() gin.HandlerFunc {
 }
 
 // AdminAuthMiddleware enforces HTTP Basic Authentication on admin UI and REST routes
-// whenever username or password is configured. When both are empty, requests are allowed through.
-func AdminAuthMiddleware(username, password string) gin.HandlerFunc {
+// whenever username or password is configured. In production, credentials are required.
+// It also protects against cross-site request forgery by rejecting cross-site mutating requests.
+func AdminAuthMiddleware(username, password string, env Environment) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead && c.Request.Method != http.MethodOptions {
+			if c.GetHeader("Sec-Fetch-Site") == "cross-site" {
+				pd := NewProblemDetails(http.StatusForbidden, "cross-site requests not allowed")
+				pd.Respond(c)
+				return
+			}
+		}
+
 		if username == "" && password == "" {
+			if env == EnvironmentProduction {
+				c.Header("WWW-Authenticate", `Basic realm="PSP Relay Admin"`)
+				pd := NewProblemDetails(http.StatusUnauthorized, "admin access disabled: ADMIN_USERNAME and ADMIN_PASSWORD must be configured in production")
+				pd.Respond(c)
+				return
+			}
 			c.Next()
 			return
 		}
