@@ -58,7 +58,7 @@ services:
     ports:
       - "${APP_BIND_IP:-0.0.0.0}:${APP_PORT:-8083}:8083"
     environment:
-      - ADDR=${ADDR:-:8083}
+      - ADDR=:8083
       - ENVIRONMENT=${ENVIRONMENT:-production}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - CONFIG_FILE_PATH=${CONFIG_FILE_PATH:-/app/config.yaml}
