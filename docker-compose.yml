@@ -3,15 +3,15 @@ services:
     image: postgres:16-alpine
     container_name: psprelay-postgres
     environment:
-      POSTGRES_USER: psprelay
-      POSTGRES_PASSWORD: psprelay_password
-      POSTGRES_DB: psprelay
+      POSTGRES_USER: ${POSTGRES_USER:-psprelay}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-psprelay_password}
+      POSTGRES_DB: ${POSTGRES_DB:-psprelay}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_BIND_IP:-0.0.0.0}:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U psprelay -d psprelay"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-psprelay} -d ${POSTGRES_DB:-psprelay}"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -56,19 +56,27 @@ services:
         condition: service_healthy
         required: false
     ports:
-      - "8083:8083"
+      - "${APP_BIND_IP:-0.0.0.0}:${APP_PORT:-8083}:8083"
     environment:
       - ADDR=:8083
-      - ENVIRONMENT=production
-      - LOG_LEVEL=info
-      - CONFIG_FILE_PATH=/app/config.yaml
-      - DATABASE_URL=postgres://psprelay:psprelay_password@postgres:5432/psprelay?sslmode=disable
-      - KAFKA_BROKERS=kafka:9092
-      - KAFKA_TOPIC=psp.webhooks
-      - KAFKA_DLQ_TOPIC=psp.webhooks.dlq
-      - KAFKA_CONSUMER_GROUP=psprelay-dispatcher
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - CONFIG_FILE_PATH=${CONFIG_FILE_PATH:-/app/config.yaml}
+      - DATABASE_URL=${DATABASE_URL:-postgres://psprelay:psprelay_password@postgres:5432/psprelay?sslmode=disable}
+      - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
+      - KAFKA_TOPIC=${KAFKA_TOPIC:-psp.webhooks}
+      - KAFKA_DLQ_TOPIC=${KAFKA_DLQ_TOPIC:-psp.webhooks.dlq}
+      - KAFKA_CONSUMER_GROUP=${KAFKA_CONSUMER_GROUP:-psprelay-dispatcher}
+      - PAYSTACK_SECRET_KEY=${PAYSTACK_SECRET_KEY:-}
+      - FLUTTERWAVE_SECRET_HASH=${FLUTTERWAVE_SECRET_HASH:-}
+      - MONNIFY_SECRET_KEY=${MONNIFY_SECRET_KEY:-}
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      - OUTBOX_POLL_INTERVAL=${OUTBOX_POLL_INTERVAL:-5s}
+      - RETRY_POLL_INTERVAL=${RETRY_POLL_INTERVAL:-2s}
+      - RETRY_BASE_BACKOFF=${RETRY_BASE_BACKOFF:-5s}
     volumes:
-      - ./config.yaml:/app/config.yaml:ro
+      - ${CONFIG_HOST_PATH:-./config.yaml}:/app/config.yaml:ro
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8083/v1/healthz"]
       interval: 10s

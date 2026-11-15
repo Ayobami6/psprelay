@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Production Docker Compose override (`docker-compose.prod.yml`), `.env.example` template, `deploy.sh` script, and `Makefile` `docker-prod-up`/`docker-prod-down` targets for deploying `psprelay` alongside an external shared Kafka broker network (`docker_default`) without starting a duplicate Kafka container.
+- Parameterized environment variables and host port bindings in `docker-compose.yml` to support isolated production overrides.
 - Server-rendered HTMX Management UI (`/admin`) and JSON Admin REST API (`/v1/admin/*`) for viewing per-product webhook events, inspecting headers/payloads, viewing delivery failures, and executing immediate single-item retries, event replays, and asynchronous bulk retries.
 - Optional HTTP Basic Authentication middleware (`AdminAuthMiddleware`) configured via `ADMIN_USERNAME` and `ADMIN_PASSWORD`.
 - `product` attribution column and `(product, created_at DESC)` index on `webhook_events` resolved at ingestion and dispatch.
