@@ -24,3 +24,6 @@ coverage.html
 .idea/
 .vscode/
 .env
+.env.*
+!.env.example
+config.prod.yaml

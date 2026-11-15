@@ -1,0 +1,15 @@
+# Production Docker Compose override for pay_dev.
+# Attaches psprelay to the shared external Kafka network (crosspay_kafka)
+# while keeping PostgreSQL isolated on the local compose network.
+services:
+  psprelay:
+    env_file:
+      - .env
+    networks:
+      - default
+      - kafka_net
+
+networks:
+  kafka_net:
+    name: ${KAFKA_EXTERNAL_NETWORK:-docker_default}
+    external: true

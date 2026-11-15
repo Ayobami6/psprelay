@@ -8,7 +8,7 @@ BIN_DIR ?= bin
 
 .DEFAULT_GOAL := build
 
-.PHONY: run dev build test test-cov test-cov-html lint security ci docker-build docker-up docker-down
+.PHONY: run dev build test test-cov test-cov-html lint security ci docker-build docker-up docker-down docker-prod-up docker-prod-down
 
 run:
 	@go run cmd/main.go
@@ -50,3 +50,9 @@ docker-up:
 
 docker-down:
 	@docker compose down
+
+docker-prod-up:
+	@docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+
+docker-prod-down:
+	@docker compose -f docker-compose.yml -f docker-compose.prod.yml down
