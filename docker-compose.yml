@@ -62,7 +62,7 @@ services:
       - ENVIRONMENT=${ENVIRONMENT:-production}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - CONFIG_FILE_PATH=${CONFIG_FILE_PATH:-/app/config.yaml}
-      - DATABASE_URL=${DATABASE_URL:-postgres://psprelay:psprelay_password@postgres:5432/psprelay?sslmode=disable}
+      - DATABASE_URL=${DATABASE_URL:-postgres://psprelay:psprelay_password@psprelay-postgres:5432/psprelay?sslmode=disable}
       - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
       - KAFKA_TOPIC=${KAFKA_TOPIC:-psp.webhooks}
       - KAFKA_DLQ_TOPIC=${KAFKA_DLQ_TOPIC:-psp.webhooks.dlq}
